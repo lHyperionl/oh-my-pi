@@ -1,0 +1,385 @@
+# Temporary validation branch only; every job checks out e30d1ff24b57edd34ad8df73c561c85dd364a2d8.
+name: Validate PR 16631 on Linux
+'on':
+  push:
+    branches:
+    - validate/pr16631-native-e30d1ff24b
+permissions:
+  contents: read
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  NATIVES_X64_TARGETS: natives-linux-x64-baseline natives-linux-x64-modern
+  NATIVES_CROSS_TARGETS: natives-darwin-arm64 natives-darwin-x64-baseline natives-linux-arm64 natives-linux-musl-arm64 natives-linux-musl-x64-baseline
+    natives-win32-arm64 natives-win32-x64-baseline
+  OMP_TEST_TIMEOUT: '120'
+concurrency:
+  group: validate-pr16631-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  check:
+    name: Lint, type check & web build
+    runs-on: ubuntu-22.04
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: e30d1ff24b57edd34ad8df73c561c85dd364a2d8
+    - uses: ./.github/actions/bun-install
+    - name: Verify Rust license compliance (cargo-deny 0.20.2)
+      run: "# Prebuilt release binary checked against digests pinned here:\n# `cargo install` compiled cargo-deny from source on every run\n#\
+        \ (~135 s), and a .sha256 fetched from the same mutable release\n# would prove transport integrity only. Bump ver and both\n# digests\
+        \ together.\nver=0.20.2\ncase \"$(uname -m)\" in\n  x86_64) arch=x86_64 sha=9f12ed4c49936e09b48bf862b595cde2fe64fcbd9d74dfacac6131ca824c8d5f\
+        \ ;;\n  aarch64|arm64) arch=aarch64 sha=995c82be0defc7a025cae49a2aa2644ce8245c9a3318fc4103907c6a285e8c7d ;;\n  *) echo \"::error::unsupported\
+        \ arch $(uname -m)\"; exit 1 ;;\nesac\nname=\"cargo-deny-$ver-$arch-unknown-linux-musl\"\ncurl -fsSL --retry 3 -o \"$RUNNER_TEMP/$name.tar.gz\"\
+        \ \"https://github.com/EmbarkStudios/cargo-deny/releases/download/$ver/$name.tar.gz\"\necho \"$sha  $RUNNER_TEMP/$name.tar.gz\" | sha256sum\
+        \ -c -\ntar -xzf \"$RUNNER_TEMP/$name.tar.gz\" -C \"$RUNNER_TEMP\"\nmkdir -p \"$HOME/.cargo/bin\"\ninstall -m 0755 \"$RUNNER_TEMP/$name/cargo-deny\"\
+        \ \"$HOME/.cargo/bin/cargo-deny\"\n# `--offline` needs every workspace crate already in the registry\n# cache. PR runs use a fresh GitHub-hosted\
+        \ runner (see runs-on\n# above) with no prior cargo work, so nothing populates the index\n# for our own graph and resolution fails. Non-PR\
+        \ events land on\n# vmon, whose omp-ci template bakes a warm Cargo registry (only\n# crates added since the template build download).\
+        \ Fetch first.\ncargo fetch --locked\ncargo deny --locked --offline check licenses sources\n"
+    - name: Type check workspace
+      run: bun run ci:check:full
+    - name: Build collab web
+      run: bun run collab:web:build
+    permissions:
+      contents: read
+  bazel_lock:
+    name: Check MODULE.bazel.lock freshness
+    runs-on: ubuntu-22.04
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: e30d1ff24b57edd34ad8df73c561c85dd364a2d8
+    - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6
+      with:
+        bun-version: 1.4.4
+    - name: Check crate_universe entry
+      run: bun scripts/gen-bazel-lock.ts --check
+    - name: Refresh MODULE.bazel.lock
+      if: failure()
+      run: bun scripts/gen-bazel-lock.ts
+    - name: Upload refreshed MODULE.bazel.lock
+      if: failure()
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: MODULE.bazel.lock
+        path: MODULE.bazel.lock
+    permissions:
+      contents: read
+  native_addons:
+    name: Build native addons (bazel)
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: e30d1ff24b57edd34ad8df73c561c85dd364a2d8
+    - name: Detect native input changes
+      id: native-inputs
+      shell: bash
+      env:
+        PR_BASE_SHA: 3fedf8d53267e32a6d7521ce725fdcc4a36fdc67
+      run: "set -euo pipefail\n# checkout is shallow; fetch the event's exact base, then compare\n# it with the checked-out PR merge tree (not\
+        \ a moving main ref).\ngit fetch --no-tags --depth=1 origin \"$PR_BASE_SHA\"\n# Keep these paths in sync with NATIVE_INPUTS_HASH below.\n\
+        if git diff --quiet \"$PR_BASE_SHA\" HEAD -- \\\n  Cargo.toml Cargo.lock MODULE.bazel MODULE.bazel.lock \\\n  rust-toolchain.toml rustfmt.toml\
+        \ .bazelrc .bazelignore .bazelversion \\\n  bazel/ crates/ BUILD.bazel; then\n  echo \"changed=false\" >> \"$GITHUB_OUTPUT\"\nelse\n \
+        \ status=$?\n  if [ \"$status\" -ne 1 ]; then exit \"$status\"; fi\n  echo \"changed=true\" >> \"$GITHUB_OUTPUT\"\nfi\n"
+    - name: Compute native addon cache key
+      id: natives-key
+      shell: bash
+      env:
+        NATIVE_INPUTS_HASH: ${{ hashFiles('Cargo.toml', 'Cargo.lock', 'MODULE.bazel', 'MODULE.bazel.lock', 'rust-toolchain.toml', 'rustfmt.toml',
+          '.bazelrc', '.bazelignore', '.bazelversion', 'bazel/**', 'crates/**', 'BUILD.bazel') }}
+      run: 'echo "prefix=natives-linux-x64-v1-" >> "$GITHUB_OUTPUT"
+
+        echo "key=natives-linux-x64-v1-$NATIVE_INPUTS_HASH" >> "$GITHUB_OUTPUT"
+
+        '
+    - name: Restore main-built native addons
+      id: natives-cache
+      if: true && steps.native-inputs.outputs.changed == 'false'
+      uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+      with:
+        path: ci-natives
+        key: ${{ steps.natives-key.outputs.key }}
+        restore-keys: '${{ steps.natives-key.outputs.prefix }}
+
+          '
+    - name: Fetch release native addons (npm)
+      if: true && steps.native-inputs.outputs.changed == 'false' && steps.natives-cache.outputs.cache-matched-key == ''
+      shell: bash
+      run: 'set -euo pipefail
+
+        tarball="$(npm view @oh-my-pi/pi-natives-linux-x64@latest dist.tarball)"
+
+        echo "Fetching $tarball"
+
+        curl -fsSL --retry 3 "$tarball" | tar -xz -C "$RUNNER_TEMP"
+
+        mkdir -p ci-natives/natives-linux-x64-baseline ci-natives/natives-linux-x64-modern
+
+        cp "$RUNNER_TEMP/package/pi_natives.linux-x64-baseline.node" ci-natives/natives-linux-x64-baseline/
+
+        cp "$RUNNER_TEMP/package/pi_natives.linux-x64-modern.node" ci-natives/natives-linux-x64-modern/
+
+        '
+    - name: Report native addon source
+      shell: bash
+      env:
+        CHANGED: ${{ steps.native-inputs.outputs.changed }}
+        EXACT: ${{ steps.natives-cache.outputs.cache-hit }}
+        MATCHED: ${{ steps.natives-cache.outputs.cache-matched-key }}
+      run: "if [ \"$CHANGED\" = true ]; then\n  echo \"Native inputs differ from the PR base; building addons from this checkout.\"\nelif [ \"\
+        $EXACT\" = true ]; then\n  echo \"Using main's addons for this exact native source state ($MATCHED).\"\nelif [ -n \"$MATCHED\" ]; then\n\
+        \  echo \"::notice title=Native addons not source-matched::This PR has no native changes, but no exact main build is cached; testing against\
+        \ main's newest addon build ($MATCHED).\"\nelse\n  echo \"::notice title=Native addons from npm::No main-built addon cache entry is available;\
+        \ testing against the latest npm release addons.\"\nfi\n"
+    - id: cache
+      if: false || steps.native-inputs.outputs.changed == 'true'
+      uses: ./.github/actions/bazel-cache
+    - name: Build linux-x64 native addons
+      if: false || steps.native-inputs.outputs.changed == 'true'
+      run: "set -eo pipefail\nif [ \"$(ulimit -Sn)\" != unlimited ] && [ \"$(ulimit -Sn)\" -lt 65536 ]; then ulimit -Sn 65536 || true; fi\n# The\
+        \ addon cdylib links each peak at several GiB of rustc RSS;\n# building several addons in one invocation runs them\n# concurrently, which\
+        \ OOMed the 14 GiB runner VM and took the bazel\n# server with it (exit 37 \"Server terminated abruptly\", runs\n# 30556752623 / 30557524371).\
+        \ Build one addon per invocation \u2014\n# analysis and cached actions are shared through the persistent\n# server, so only the heavy\
+        \ links serialize.\n: > \"$RUNNER_TEMP/bazel-build.log\"\nfor target in $NATIVES_X64_TARGETS; do\n  bazelisk --bazelrc=\"${{ steps.cache.outputs.rc\
+        \ }}\" build \"//:$target\" 2>&1 | tee -a \"$RUNNER_TEMP/bazel-build.log\"\ndone\nfor target in $NATIVES_X64_TARGETS; do\n  mkdir -p \"\
+        ci-natives/$target\"\n  cp -L bazel-bin/\"$target\"/*.node \"ci-natives/$target/\"\ndone\n"
+    - name: Report bazel cache stats
+      if: false || steps.native-inputs.outputs.changed == 'true'
+      shell: bash
+      run: "# Bazel runs with --color=yes (config=ci); strip ANSI before\n# matching \u2014 escapes split \"INFO:\" from the process count in\n\
+        # the raw log.\nsummary=$(sed -E 's/\\x1b\\[[0-9;]*m//g' \"$RUNNER_TEMP/bazel-build.log\" | grep -E '[0-9]+ processes:' | tail -1 || true)\n\
+        echo \"::notice title=Bazel build summary::${summary:-no process summary found}\"\n"
+    - name: Smoke native addons
+      shell: bash
+      run: "set -euo pipefail\n# NOTE: `bun -e 'require(\"./x.node\")'` swallows dlopen failures\n# (exit 0 on a bogus addon); a script file enforces\
+        \ them in\n# both bun and node. Verified against a corrupt .node fixture.\ncat > \"$RUNNER_TEMP/smoke-addons.js\" <<'EOF'\nfor (const\
+        \ f of process.argv.slice(2)) {\n const m = require(f);\n if (!m || Object.keys(m).length === 0) {\n \tconsole.error(`addon failed to\
+        \ load: ${f}`);\n \tprocess.exit(1);\n }\n}\nEOF\nloader=node\nif command -v bun >/dev/null 2>&1; then loader=bun; fi\n\"$loader\" \"\
+        $RUNNER_TEMP/smoke-addons.js\" \\\n  \"$PWD/ci-natives/natives-linux-x64-baseline/pi_natives.linux-x64-baseline.node\" \\\n  \"$PWD/ci-natives/natives-linux-x64-modern/pi_natives.linux-x64-modern.node\"\
+        \n"
+    - name: Locate GitHub's cache service
+      id: gh-results
+      if: false && github.ref == 'refs/heads/main'
+      uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3
+      with:
+        script: core.setOutput("url", process.env.ACTIONS_RESULTS_ORL || process.env.ACTIONS_RESULTS_URL)
+    - name: Probe native addon cache entry
+      id: natives-cache-probe
+      if: false && github.ref == 'refs/heads/main'
+      continue-on-error: true
+      uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830
+      env:
+        ACTIONS_RESULTS_URL: ${{ steps.gh-results.outputs.url }}
+      with:
+        path: ci-natives
+        key: ${{ steps.natives-key.outputs.key }}
+        lookup-only: true
+    - name: Save native addon cache entry
+      if: false && github.ref == 'refs/heads/main' && steps.natives-cache-probe.outputs.cache-hit != 'true'
+      continue-on-error: true
+      uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830
+      env:
+        ACTIONS_RESULTS_URL: ${{ steps.gh-results.outputs.url }}
+      with:
+        path: ci-natives
+        key: ${{ steps.natives-key.outputs.key }}
+    - name: Prune superseded native addon cache entries
+      if: false && github.ref == 'refs/heads/main' && steps.natives-cache-probe.outputs.cache-hit != 'true'
+      continue-on-error: true
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        PREFIX: ${{ steps.natives-key.outputs.prefix }}
+      run: "# Best-effort: a failed prune leaves eviction to GitHub's LRU.\ngh cache list --repo \"$GITHUB_REPOSITORY\" --ref refs/heads/main\
+        \ --key \"$PREFIX\" \\\n    --sort created_at --order desc --limit 100 --json id --jq '.[2:][].id' \\\n  | while read -r id; do\n    \
+        \  gh cache delete \"$id\" --repo \"$GITHUB_REPOSITORY\" || true\n    done || true\n"
+    - name: Upload linux-x64 native addon artifact
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: natives-linux-x64
+        path: ci-natives/natives-linux-x64-*/*.node
+        if-no-files-found: error
+        retention-days: 1
+  test_coding_agent_native:
+    name: Test coding-agent native/unit (TS) ${{ matrix.shard }}
+    runs-on: ubuntu-22.04
+    needs:
+    - native_addons
+    if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: ${{ fromJSON(true && '["1/3","2/3","3/3"]' || '["1/1"]') }}
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: e30d1ff24b57edd34ad8df73c561c85dd364a2d8
+    - uses: ./.github/actions/bun-install
+    - uses: ./.github/actions/native-artifacts
+      with:
+        targets: linux-x64-baseline linux-x64-modern
+    - name: Test coding-agent native/unit bucket
+      env:
+        OMP_TEST_CONCURRENCY: '4'
+        OMP_TEST_SHARD: ${{ matrix.shard }}
+      run: bun run ci:test:coding-agent:native
+    permissions:
+      contents: read
+  test_workspace:
+    name: Test TS workspace fast
+    runs-on: ubuntu-22.04
+    needs:
+    - native_addons
+    if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
+    timeout-minutes: 20
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: e30d1ff24b57edd34ad8df73c561c85dd364a2d8
+    - uses: ./.github/actions/bun-install
+    - uses: ./.github/actions/native-artifacts
+      with:
+        targets: linux-x64-baseline linux-x64-modern
+    - name: Test workspace packages and repo scripts (TS)
+      env:
+        OMP_TEST_CONCURRENCY: '4'
+      run: 'bun run ci:test:ts:workspace
+
+        # Not `test:scripts`: scripts/install.test.ts fails on main
+
+        # (its install.sh smoke-check executes a fake binary), so running
+
+        # the whole group here would red this job on an unrelated break.
+
+        bun test scripts/release.test.ts scripts/ci-build-upload.test.ts scripts/run-rs-task.test.ts
+
+        '
+    permissions:
+      contents: read
+  test_coding_agent_singleton:
+    name: Test coding-agent singleton/global-state (TS)
+    runs-on: ubuntu-22.04
+    needs:
+    - native_addons
+    if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
+    timeout-minutes: 20
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: e30d1ff24b57edd34ad8df73c561c85dd364a2d8
+    - uses: ./.github/actions/bun-install
+    - uses: ./.github/actions/native-artifacts
+      with:
+        targets: linux-x64-baseline linux-x64-modern
+    - name: Test coding-agent singleton/global-state bucket
+      run: bun run ci:test:coding-agent:singleton
+    permissions:
+      contents: read
+  test_ts_native:
+    name: Test TS native/integration packages
+    runs-on: ubuntu-22.04
+    needs:
+    - native_addons
+    if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
+    timeout-minutes: 25
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: e30d1ff24b57edd34ad8df73c561c85dd364a2d8
+    - uses: ./.github/actions/bun-install
+    - uses: ./.github/actions/native-artifacts
+      with:
+        targets: linux-x64-baseline linux-x64-modern
+    - name: Install project-local TUI debug tool dependencies
+      run: bun install --cwd .omp/tools --frozen-lockfile
+    - name: Test native/TUI/browser-ish packages (TS)
+      env:
+        OMP_TEST_CONCURRENCY: '4'
+      run: bun run ci:test:ts:native
+    permissions:
+      contents: read
+  test_coding_agent_ui:
+    name: Test coding-agent UI/TUI (TS)
+    runs-on: ubuntu-22.04
+    needs:
+    - native_addons
+    if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
+    timeout-minutes: 25
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: e30d1ff24b57edd34ad8df73c561c85dd364a2d8
+    - uses: ./.github/actions/bun-install
+    - uses: ./.github/actions/native-artifacts
+      with:
+        targets: linux-x64-baseline linux-x64-modern
+    - name: Test coding-agent UI/TUI bucket
+      env:
+        OMP_TEST_CONCURRENCY: '2'
+      run: bun run ci:test:coding-agent:ui
+    permissions:
+      contents: read
+  test_coding_agent_runtime:
+    name: Test coding-agent runtime/session (TS)
+    runs-on: ubuntu-22.04
+    needs:
+    - native_addons
+    if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
+    timeout-minutes: 25
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: e30d1ff24b57edd34ad8df73c561c85dd364a2d8
+    - uses: ./.github/actions/bun-install
+    - uses: ./.github/actions/native-artifacts
+      with:
+        targets: linux-x64-baseline linux-x64-modern
+    - name: Test coding-agent runtime bucket
+      env:
+        OMP_TEST_CONCURRENCY: '4'
+      run: bun run ci:test:coding-agent:runtime
+    permissions:
+      contents: read
+  test_smoke:
+    name: Test CLI smoke (TS)
+    runs-on: ubuntu-22.04
+    needs:
+    - native_addons
+    if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
+    timeout-minutes: 15
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: e30d1ff24b57edd34ad8df73c561c85dd364a2d8
+    - uses: ./.github/actions/bun-install
+    - uses: ./.github/actions/native-artifacts
+      with:
+        targets: linux-x64-baseline linux-x64-modern
+    - name: CLI smoke test
+      run: bun run ci:test:smoke
+    permissions:
+      contents: read
+  install_methods:
+    name: Install method smoke tests
+    runs-on: ubuntu-22.04
+    needs:
+    - native_addons
+    if: ${{ !cancelled() && needs.native_addons.result == 'success' }}
+    steps:
+    - uses: actions/checkout@v4
+      with:
+        ref: e30d1ff24b57edd34ad8df73c561c85dd364a2d8
+    - uses: ./.github/actions/bun-install
+    - uses: ./.github/actions/native-artifacts
+      with:
+        targets: linux-x64-baseline linux-x64-modern
+    - name: Install method smoke tests
+      env:
+        OMP_INSTALL_TEST_SKIP_NATIVE_BUILD: '1'
+      run: bun run ci:test:install-methods
+    permissions:
+      contents: read
