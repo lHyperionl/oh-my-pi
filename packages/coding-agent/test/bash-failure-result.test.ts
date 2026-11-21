@@ -9,6 +9,7 @@ import { BashTool } from "@oh-my-pi/pi-coding-agent/tools/bash";
 import { Shell } from "@oh-my-pi/pi-natives";
 import { getThemeByName } from "@oh-my-pi/pi-tui/theme";
 import { bashToolRenderer } from "@oh-my-pi/pi-tui/tools/bash";
+import { formatRawOutputNotice } from "@oh-my-pi/pi-tui/tools/output-meta";
 
 afterEach(() => {
 	mock.restore();
@@ -35,6 +36,15 @@ function makeSession(): ToolSession {
 }
 
 describe("BashTool execution results", () => {
+	it("persists the entire bounded trace when its JSON exceeds 200 KB", async () => {
+		const tool = new BashTool(makeSession());
+		const result = await tool.execute("call-large-trace", { command: "printf '%0210000d' 0" }, undefined, () => {});
+		const trace = result.details?.trace;
+		expect(trace).toBeDefined();
+		expect(JSON.stringify(trace).length).toBeGreaterThan(200_000);
+		expect(trace?.history?.some(event => event.kind === "Output")).toBe(true);
+	});
+
 	it.each([
 		{ wallTimeMs: 0, noticeCount: 1 },
 		{ wallTimeMs: 1000, noticeCount: 2 },
@@ -84,6 +94,15 @@ describe("BashTool execution results", () => {
 		// The LLM-facing text still states the exit code verbatim.
 		const text = result.content.find(c => c.type === "text")?.text ?? "";
 		expect(text).toContain("Command exited with code 3");
+	});
+
+	it("says a command that printed nothing exited cleanly, so an empty result reads as success", async () => {
+		const tool = new BashTool(makeSession());
+
+		const result = await tool.execute("call-silent", { command: "true" });
+
+		expect(result.isError).toBeUndefined();
+		expect(result.content.find(c => c.type === "text")?.text).toStartWith("(no output, exit code 0)");
 	});
 
 	it("returns a warning-state timeout result with one timeout notice", async () => {
@@ -162,29 +181,20 @@ describe("BashTool execution results", () => {
 
 	it("gives a call the identity of the session it started in, even if the session changes before it runs", async () => {
 		let sessionId = "session-a";
-		const gate = Promise.withResolvers<void>();
-		let allocating = Promise.withResolvers<void>();
 		const tool = new BashTool({
 			...makeSession(),
 			getSessionId: () => sessionId,
 			getSessionFile: () => path.resolve(`/sessions/${sessionId}.jsonl`),
-			allocateOutputArtifact: async () => {
-				allocating.resolve();
-				await gate.promise;
-				return {};
-			},
 		} as unknown as ToolSession);
 		const probe = `printf '%s|%s|' "$PI_SESSION_ID" "$PI_SESSION_FILE"`;
 		const fields = (result: { content: readonly { type: string; text?: string }[] }) =>
 			(result.content.find(c => c.type === "text")?.text ?? "").split("|").slice(0, 2);
 
 		const pending = tool.execute("call-a", { command: probe });
-		await allocating.promise;
-		sessionId = "session-b"; // e.g. `/fork` while the call waits on its artifact
-		gate.resolve();
+		// e.g. `/fork` landing after the call started but before its shell runs.
+		sessionId = "session-b";
 		expect(fields(await pending)).toEqual(["session-a", path.resolve("/sessions/session-a.jsonl")]);
 
-		allocating = Promise.withResolvers<void>();
 		expect(fields(await tool.execute("call-b", { command: probe }))).toEqual([
 			"session-b",
 			path.resolve("/sessions/session-b.jsonl"),
@@ -223,6 +233,71 @@ describe("BashTool execution results", () => {
 		expect(result.details?.exitCode).toBe(1);
 		const text = result.content.find(c => c.type === "text")?.text ?? "";
 		expect(text).toContain("TS2304 Cannot find name 'foo'");
+		expect(result.details?.meta?.minimized).toBeUndefined();
+	});
+
+	it("records the minimizer's filter and byte counts with the saved raw output", async () => {
+		const rawOutput = `${"src/a.ts:1:1 error TS2304 Cannot find name 'foo'\n".repeat(40)}`;
+		const minimizedText = "src/a.ts: 40 errors TS2304\n";
+		spyOn(Shell.prototype, "run").mockImplementation(function (this: Shell, _options, onChunk) {
+			onChunk?.(null, rawOutput);
+			return Promise.resolve({
+				exitCode: 1,
+				cancelled: false,
+				timedOut: false,
+				workingDir: process.cwd(),
+				minimized: {
+					filter: "lint",
+					text: minimizedText,
+					originalText: rawOutput,
+					inputBytes: Buffer.byteLength(rawOutput, "utf-8"),
+					outputBytes: Buffer.byteLength(minimizedText, "utf-8"),
+				},
+			});
+		});
+		const artifactsDir = await fs.mkdtemp(path.join(os.tmpdir(), "bash-minimized-meta-"));
+		// Sequential ids like the session's spill manager. Output that fits inline claims
+		// no spill, so the raw original gets the first id.
+		let nextId = 1;
+		const session = {
+			...makeSession(),
+			allocateOutputArtifact: async () => {
+				const id = String(nextId++);
+				return { id, path: path.join(artifactsDir, `${id}.log`) };
+			},
+		} as unknown as ToolSession;
+
+		try {
+			const args = { command: "pnpm lint" };
+			const result = await new BashTool(session).execute("call-minimized-meta", args);
+
+			expect(result.details?.meta?.minimized).toEqual({
+				filter: "lint",
+				inputBytes: Buffer.byteLength(rawOutput, "utf-8"),
+				outputBytes: Buffer.byteLength(minimizedText, "utf-8"),
+				artifactId: "1",
+			});
+			const text = result.content.find(c => c.type === "text")?.text ?? "";
+			expect(text).toContain(formatRawOutputNotice("1"));
+			expect(text).not.toContain("Minimized");
+			expect(await Bun.file(path.join(artifactsDir, "1.log")).text()).toBe(rawOutput);
+
+			const theme = await getThemeByName("dark");
+			if (!theme) throw new Error("Expected dark theme");
+			const rendered = Bun.stripANSI(
+				bashToolRenderer
+					.renderResult(result, { expanded: false, isPartial: false }, theme, args)
+					.render(160)
+					.join("\n"),
+			);
+			expect(rendered).toContain(`${theme.icon.minimize} lint 1.9KB → 27B`);
+			const view = JSON.stringify(
+				bashToolRenderer.describeResult(result, { expanded: false, isPartial: false }, args),
+			);
+			expect(view).toContain("Minimized lint 1.9KB → 27B");
+		} finally {
+			await fs.rm(artifactsDir, { recursive: true, force: true });
+		}
 	});
 
 	it("preserves final-stage output when a pipeline ends in head or tail", async () => {

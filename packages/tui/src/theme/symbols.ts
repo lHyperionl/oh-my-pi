@@ -19,6 +19,7 @@ export type SymbolKey =
 	| "status.running"
 	| "status.shadowed"
 	| "status.aborted"
+	/** @deprecated Alias of `status.success`; kept so extensions and theme overrides that name it keep working. */
 	| "status.done"
 	// Navigation
 	| "nav.cursor"
@@ -108,15 +109,20 @@ export type SymbolKey =
 	| "icon.job"
 	| "icon.cache"
 	| "icon.cacheMiss"
+	| "icon.cacheWarm"
+	| "icon.cacheCold"
 	| "icon.input"
 	| "icon.output"
 	| "icon.throughput"
 	| "icon.intelligence"
 	| "icon.host"
+	| "icon.server"
 	| "icon.session"
+	| "icon.pid"
 	| "icon.package"
 	| "icon.warning"
 	| "icon.rewind"
+	| "icon.minimize"
 	| "icon.auto"
 	| "icon.fast"
 	| "icon.extensionSkill"
@@ -406,7 +412,7 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"status.running": "⟳",
 	"status.shadowed": "○",
 	"status.aborted": "⏹",
-	"status.done": "•",
+	"status.done": "✔",
 	// Navigation
 	"nav.cursor": "❯",
 	"nav.selected": "➤",
@@ -496,15 +502,20 @@ const UNICODE_SYMBOLS: SymbolMap = {
 	"icon.job": "⚙",
 	"icon.cache": "💾",
 	"icon.cacheMiss": "⊘",
+	"icon.cacheWarm": "●",
+	"icon.cacheCold": "⊘",
 	"icon.input": "⤵",
 	"icon.output": "⤴",
 	"icon.throughput": "⚡",
 	"icon.intelligence": "🧠",
 	"icon.host": "🖥",
+	"icon.server": "🗄",
 	"icon.session": "🆔",
+	"icon.pid": "#",
 	"icon.package": "📦",
 	"icon.warning": "⚠",
 	"icon.rewind": "↶",
+	"icon.minimize": "⇲",
 	"icon.auto": "⟲",
 	"icon.fast": "⚡",
 	"icon.extensionSkill": "✦",
@@ -724,8 +735,8 @@ const NERD_SYMBOLS: SymbolMap = {
 	"status.shadowed": "\uf10c",
 	// pick:  | alt:  
 	"status.aborted": "\uf04d",
-	// pick: • | alt: ● ·
-	"status.done": "•",
+	// alias of status.success
+	"status.done": "\uf00c",
 	// Navigation
 	// pick:  | alt:  
 	"nav.cursor": "\uf054",
@@ -890,6 +901,10 @@ const NERD_SYMBOLS: SymbolMap = {
 	"icon.cache": "\uf1c0",
 	// pick:  (fa-ban) | alt: ⊘
 	"icon.cacheMiss": "\uf05e",
+	// pick: 󱘲 (nf-md-database_outline) | alt: 
+	"icon.cacheWarm": "\u{f1632}",
+	// pick: 󱘱 (nf-md-database_off_outline): the warm glyph struck through | alt: 
+	"icon.cacheCold": "\u{f1631}",
 	// pick:  | alt:  →
 	"icon.input": "\uf090",
 	// pick:  | alt:  →
@@ -900,14 +915,17 @@ const NERD_SYMBOLS: SymbolMap = {
 	"icon.intelligence": "\uee9c",
 	// pick:  | alt:  
 	"icon.host": "\uf109",
+	"icon.server": "\uf233",
 	// pick: 󰁑 (nf-md-arrow_left_bold_hexagon_outline) | alt:  
 	"icon.session": "\u{f0051}",
+	"icon.pid": "\uf292",
 	// pick:  | alt: 
 	"icon.package": "\uf487",
 	// pick:  | alt:  
 	"icon.warning": "\uf071",
 	// pick:  | alt:  ↺
 	"icon.rewind": "\uf0e2",
+	"icon.minimize": "\u{f0aa6}",
 	// pick: 󰁨 | alt:   
 	"icon.auto": "\u{f0068}",
 	"icon.fast": "\uf0e7",
@@ -1190,26 +1208,28 @@ const NERD_SYMBOLS: SymbolMap = {
 
 const ASCII_SYMBOLS: SymbolMap = {
 	// Status Indicators
-	"status.success": "[ok]",
-	"status.error": "[!!]",
+	"status.success": "[+]",
+	"status.error": "[-]",
 	"status.warning": "[!]",
 	"status.info": "[i]",
-	"status.pending": "[*]",
+	"status.pending": "[ ]",
 	"status.disabled": "[ ]",
 	"status.enabled": "[x]",
 	"status.running": "[~]",
 	"status.shadowed": "[/]",
-	"status.aborted": "[-]",
-	"status.done": "*",
+	"status.aborted": "[#]",
+	"status.done": "[+]",
 	// Navigation
 	"nav.cursor": ">",
 	"nav.selected": "->",
 	"nav.expand": "+",
 	"nav.collapse": "-",
 	"nav.back": "<-",
-	// Tree Connectors
-	"tree.branch": "|--",
-	"tree.last": "'--",
+	// Tree Connectors: branches are two columns, like the Unicode `├─`, so a
+	// branch and its space match the three-column continuation (`|  `) that
+	// child rows hang under.
+	"tree.branch": "|-",
+	"tree.last": "'-",
 	"tree.vertical": "|",
 	"tree.horizontal": "-",
 	"tree.hook": "`-",
@@ -1294,12 +1314,17 @@ const ASCII_SYMBOLS: SymbolMap = {
 	"icon.intelligence": "IQ",
 	"icon.cache": "cache",
 	"icon.cacheMiss": "!",
+	"icon.cacheWarm": "cache",
+	"icon.cacheCold": "!cache",
 	"icon.input": "in:",
 	"icon.host": "host",
+	"icon.server": "srv",
 	"icon.session": "id",
+	"icon.pid": "#",
 	"icon.package": "[P]",
 	"icon.warning": "[!]",
 	"icon.rewind": "<-",
+	"icon.minimize": "min",
 	"icon.auto": "[A]",
 	"icon.fast": ">>",
 	"icon.extensionSkill": "SK",
@@ -1507,7 +1532,8 @@ export const SPINNER_FRAMES: Record<SymbolPreset, Record<SpinnerType, string[]>>
 		activity: ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
 	},
 	ascii: {
-		status: ["|", "/", "-", "\\"],
+		// Bracketed like the `status.*` glyphs, so a settling call keeps its column width.
+		status: ["[|]", "[/]", "[-]", "[\\]"],
 		activity: ["-", "\\", "|", "/"],
 	},
 };

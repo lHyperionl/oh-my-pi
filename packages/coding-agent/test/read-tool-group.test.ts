@@ -58,7 +58,7 @@ describe("ReadToolGroupComponent", () => {
 		expect(rendered.toLowerCase()).not.toContain("ctrl+o");
 	});
 
-	it("uses the enabled dot for completed reads", () => {
+	it("marks a completed read with the green success glyph", () => {
 		const component = new ReadToolGroupComponent();
 		const examplePath = path.resolve("/tmp/example.ts");
 		component.updateArgs({ path: examplePath }, "read-success");
@@ -73,10 +73,8 @@ describe("ReadToolGroupComponent", () => {
 		const rendered = component.render(120).join("\n");
 		const plain = Bun.stripANSI(rendered);
 
-		expect(plain).toContain(themeModule.theme.status.enabled);
-		expect(plain).not.toContain(themeModule.theme.status.success);
-		expect(rendered).toContain(themeModule.theme.fg("text", themeModule.theme.status.enabled));
-		expect(rendered).not.toContain(themeModule.theme.fg("success", themeModule.theme.status.enabled));
+		expect(plain).toContain(`${themeModule.theme.status.success} Read`);
+		expect(rendered).toContain(themeModule.theme.fg("success", themeModule.theme.status.success));
 	});
 
 	it("omits duplicate success marks from multi-read child rows", () => {
@@ -93,8 +91,8 @@ describe("ReadToolGroupComponent", () => {
 		expect(plain).toContain("Read (2)");
 		expect(plain).toContain(`${themeModule.theme.tree.branch} ${onePath}`);
 		expect(plain).toContain(`${themeModule.theme.tree.last} ${twoPath}`);
-		expect(plain).not.toContain(`${themeModule.theme.tree.branch} ${themeModule.theme.status.enabled}`);
-		expect(plain).not.toContain(`${themeModule.theme.tree.last} ${themeModule.theme.status.enabled}`);
+		expect(plain).not.toContain(`${themeModule.theme.tree.branch} ${themeModule.theme.status.success}`);
+		expect(plain).not.toContain(`${themeModule.theme.tree.last} ${themeModule.theme.status.success}`);
 	});
 
 	it("nests one usage row beneath the last path from each read-only turn", () => {
@@ -178,6 +176,18 @@ describe("ReadToolGroupComponent", () => {
 		expect(plain).toContain(`Read ${examplePath}:5-10,20-30`);
 		expect(plain).not.toContain("Read (2)");
 		expect(plain).not.toContain("full file");
+	});
+
+	it("keeps a list written with colon dashes on one file row", () => {
+		const component = new ReadToolGroupComponent();
+		const examplePath = path.resolve("/tmp/example.ts");
+		component.updateArgs({ path: `${examplePath}:20:40,85:100` }, "read-colon-dash");
+		component.updateResult({ content: [{ type: "text", text: "ranges" }] }, false, "read-colon-dash");
+
+		const plain = Bun.stripANSI(component.render(120).join("\n"));
+
+		expect(plain).toContain(`Read ${examplePath}:20-40,85-100`);
+		expect(plain).not.toContain("Read (2)");
 	});
 
 	it("merges repeated same-file ranges and truncates long selector lists", () => {
@@ -453,7 +463,6 @@ describe("readArgsCollapseIntoGroup", () => {
 		["issue://123"],
 		["pr://can1357/oh-my-pi/456"],
 		["agent://abc"],
-		["artifact://abc"],
 		["memory://root"],
 		["rule://name"],
 		["mcp://server/resource"],
@@ -467,8 +476,8 @@ describe("readArgsCollapseIntoGroup", () => {
 		[path.resolve("/tmp/example.ts")],
 		["./relative/path.md"],
 		["https://example.com/file"],
-		["xd://"],
-		["xd://generate_image"],
+		["help://"],
+		["help://eval/helpers"],
 	])("collapses %s into the read group", target => {
 		expect(readArgsCollapseIntoGroup({ path: target })).toBe(true);
 		expect(readArgsCollapseIntoGroup({ file_path: target })).toBe(true);
@@ -477,8 +486,8 @@ describe("readArgsCollapseIntoGroup", () => {
 	it("returns false for non-record / missing arguments", () => {
 		expect(readArgsCollapseIntoGroup(undefined)).toBe(false);
 		expect(readArgsCollapseIntoGroup(null)).toBe(false);
-		expect(readArgsCollapseIntoGroup("xd://x")).toBe(false);
-		expect(readArgsCollapseIntoGroup(["xd://x"])).toBe(false);
+		expect(readArgsCollapseIntoGroup("help://x")).toBe(false);
+		expect(readArgsCollapseIntoGroup(["help://x"])).toBe(false);
 		expect(readArgsCollapseIntoGroup({})).toBe(false);
 		expect(readArgsCollapseIntoGroup({ path: 42 })).toBe(false);
 	});
