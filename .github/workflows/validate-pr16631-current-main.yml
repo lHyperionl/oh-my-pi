@@ -1,4 +1,4 @@
-# Fork validation of PR 16631 at ab12a81dfab8b9587d69171a5c7733a0c941f7f0 against e1a9f4b41d24fe223bb71e864bef552f0fae6948.
+# Fork validation of PR 16631 at 0effc480062206bb4e9d81e60f2f853ae1e63f59 against e1a9f4b41d24fe223bb71e864bef552f0fae6948.
 name: PR 16631 hosted CI
 
 on:
@@ -29,7 +29,7 @@ jobs:
       steps:
          - uses: actions/checkout@v4
            with:
-              ref: ab12a81dfab8b9587d69171a5c7733a0c941f7f0
+              ref: 0effc480062206bb4e9d81e60f2f853ae1e63f59
          - uses: ./.github/actions/bun-install
          - name: Verify Rust license compliance (cargo-deny 0.20.2)
            run: |
@@ -89,7 +89,7 @@ jobs:
       steps:
          - uses: actions/checkout@v4
            with:
-              ref: ab12a81dfab8b9587d69171a5c7733a0c941f7f0
+              ref: 0effc480062206bb4e9d81e60f2f853ae1e63f59
          - uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
            with:
               bun-version: 1.4.4
@@ -112,131 +112,32 @@ jobs:
    # satisfies branch protection.
 
    native_addons:
-      name: Build native addons (bazel)
-      runs-on: ${{ 'pull_request' == 'pull_request' && 'ubuntu-22.04' || 'vmon-large/from=omp-ci' }}
-      # actions: write lets main prune superseded addon cache entries.
+      name: Verify and reuse source-matched Linux native addons
+      runs-on: ubuntu-22.04
       permissions:
          contents: read
+         actions: read
       steps:
          - uses: actions/checkout@v4
            with:
-              ref: ab12a81dfab8b9587d69171a5c7733a0c941f7f0
-         - name: Detect native input changes
-           id: native-inputs
+              ref: 0effc480062206bb4e9d81e60f2f853ae1e63f59
+         - name: Confirm the addon build and final commit have identical runtime sources
            shell: bash
            env:
-              PR_BASE_SHA: e1a9f4b41d24fe223bb71e864bef552f0fae6948
+              ADDON_BUILD_SHA: ab12a81dfab8b9587d69171a5c7733a0c941f7f0
            run: |
               set -euo pipefail
-              # checkout is shallow; fetch the event's exact base, then compare
-              # it with the checked-out PR merge tree (not a moving main ref).
-              git fetch --no-tags --depth=1 origin "$PR_BASE_SHA"
-              # Keep these paths in sync with NATIVE_INPUTS_HASH below.
-              if git diff --quiet "$PR_BASE_SHA" HEAD -- \
-                Cargo.toml Cargo.lock MODULE.bazel MODULE.bazel.lock \
-                rust-toolchain.toml rustfmt.toml .bazelrc .bazelignore .bazelversion \
-                bazel/ crates/ BUILD.bazel; then
-                echo "changed=false" >> "$GITHUB_OUTPUT"
-              else
-                status=$?
-                if [ "$status" -ne 1 ]; then exit "$status"; fi
-                echo "changed=true" >> "$GITHUB_OUTPUT"
-              fi
-         - name: Compute native addon cache key
-           id: natives-key
-           shell: bash
-           env:
-              # Must stay identical on every event: PRs look up the entry main
-              # saved for the same inputs.
-              NATIVE_INPUTS_HASH: ${{ hashFiles('Cargo.toml', 'Cargo.lock', 'MODULE.bazel', 'MODULE.bazel.lock', 'rust-toolchain.toml', 'rustfmt.toml', '.bazelrc', '.bazelignore', '.bazelversion', 'bazel/**', 'crates/**', 'BUILD.bazel') }}
-           run: |
-              echo "prefix=natives-linux-x64-v1-" >> "$GITHUB_OUTPUT"
-              echo "key=natives-linux-x64-v1-$NATIVE_INPUTS_HASH" >> "$GITHUB_OUTPUT"
-
-         # ---- PRs without native changes: main-built addons, else npm ----
-         # `ci-natives` is a plain workspace-relative path on purpose: the
-         # cache version hashes the literal path list, so vmon (save) and
-         # hosted (restore) must spell it identically, and upload-artifact
-         # skips dot-directories by default.
-         - name: Restore main-built native addons
-           id: natives-cache
-           if: ${{ 'pull_request' == 'pull_request' && steps.native-inputs.outputs.changed == 'false' }}
-           uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+              git fetch --no-tags --depth=1 origin "$ADDON_BUILD_SHA"
+              git diff --exit-code "$ADDON_BUILD_SHA" HEAD -- . \
+                 ':(exclude)crates/edit/tests/session.rs' \
+                 ':(exclude)packages/coding-agent/test/tools/ssh-edit.test.ts'
+         - name: Download both source-matched addons from the preceding build
+           uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
            with:
+              name: natives-linux-x64
               path: ci-natives
-              key: ${{ steps.natives-key.outputs.key }}
-              restore-keys: |
-                 ${{ steps.natives-key.outputs.prefix }}
-         - name: Fetch release native addons (npm)
-           if: ${{ 'pull_request' == 'pull_request' && steps.native-inputs.outputs.changed == 'false' && steps.natives-cache.outputs.cache-matched-key == '' }}
-           shell: bash
-           run: |
-              set -euo pipefail
-              tarball="$(npm view @oh-my-pi/pi-natives-linux-x64@latest dist.tarball)"
-              echo "Fetching $tarball"
-              curl -fsSL --retry 3 "$tarball" | tar -xz -C "$RUNNER_TEMP"
-              mkdir -p ci-natives/natives-linux-x64-baseline ci-natives/natives-linux-x64-modern
-              cp "$RUNNER_TEMP/package/pi_natives.linux-x64-baseline.node" ci-natives/natives-linux-x64-baseline/
-              cp "$RUNNER_TEMP/package/pi_natives.linux-x64-modern.node" ci-natives/natives-linux-x64-modern/
-         # Make the addon source visible whenever it is not source-matched,
-         # instead of leaving a reviewer to wonder which addons the tests ran.
-         - name: Report native addon source
-           shell: bash
-           env:
-              CHANGED: ${{ steps.native-inputs.outputs.changed }}
-              EXACT: ${{ steps.natives-cache.outputs.cache-hit }}
-              MATCHED: ${{ steps.natives-cache.outputs.cache-matched-key }}
-           run: |
-              if [ "$CHANGED" = true ]; then
-                echo "Native inputs differ from the PR base; building addons from this checkout."
-              elif [ "$EXACT" = true ]; then
-                echo "Using main's addons for this exact native source state ($MATCHED)."
-              elif [ -n "$MATCHED" ]; then
-                echo "::notice title=Native addons not source-matched::This PR has no native changes, but no exact main build is cached; testing against main's newest addon build ($MATCHED)."
-              else
-                echo "::notice title=Native addons from npm::No main-built addon cache entry is available; testing against the latest npm release addons."
-              fi
-
-         # ---- main and native-changing PRs: build the linux-x64 pair ----
-         - id: cache
-           if: ${{ 'pull_request' != 'pull_request' || steps.native-inputs.outputs.changed == 'true' }}
-           uses: ./.github/actions/bazel-cache
-         - name: Build linux-x64 native addons
-           if: ${{ 'pull_request' != 'pull_request' || steps.native-inputs.outputs.changed == 'true' }}
-           run: |
-              set -eo pipefail
-              if [ "$(ulimit -Sn)" != unlimited ] && [ "$(ulimit -Sn)" -lt 65536 ]; then ulimit -Sn 65536 || true; fi
-              # The addon cdylib links each peak at several GiB of rustc RSS;
-              # building several addons in one invocation runs them
-              # concurrently, which OOMed the 14 GiB runner VM and took the bazel
-              # server with it (exit 37 "Server terminated abruptly", runs
-              # 30556752623 / 30557524371). Build one addon per invocation —
-              # analysis and cached actions are shared through the persistent
-              # server, so only the heavy links serialize.
-              : > "$RUNNER_TEMP/bazel-build.log"
-              for target in $NATIVES_X64_TARGETS; do
-                bazelisk --bazelrc="${{ steps.cache.outputs.rc }}" build "//:$target" 2>&1 | tee -a "$RUNNER_TEMP/bazel-build.log"
-              done
-              for target in $NATIVES_X64_TARGETS; do
-                mkdir -p "ci-natives/$target"
-                cp -L bazel-bin/"$target"/*.node "ci-natives/$target/"
-              done
-         # Cache-hit visibility: a supposedly warm build that executes
-         # thousands of actions is the failure mode that made CI slow — make
-         # it visible in the run summary instead of discovering it weeks in.
-         - name: Report bazel cache stats
-           if: ${{ 'pull_request' != 'pull_request' || steps.native-inputs.outputs.changed == 'true' }}
-           shell: bash
-           run: |
-              # Bazel runs with --color=yes (config=ci); strip ANSI before
-              # matching — escapes split "INFO:" from the process count in
-              # the raw log.
-              summary=$(sed -E 's/\x1b\[[0-9;]*m//g' "$RUNNER_TEMP/bazel-build.log" | grep -E '[0-9]+ processes:' | tail -1 || true)
-              echo "::notice title=Bazel build summary::${summary:-no process summary found}"
-
-         # ---- both paths ----
-         # A corrupt download or cache entry must fail here, not as a
-         # confusing dlopen error in every downstream test shard.
+              run-id: 44940718134
+              github-token: ${ github.token }
          - name: Smoke native addons
            shell: bash
            run: |
@@ -258,60 +159,6 @@ jobs:
               "$loader" "$RUNNER_TEMP/smoke-addons.js" \
                 "$PWD/ci-natives/natives-linux-x64-baseline/pi_natives.linux-x64-baseline.node" \
                 "$PWD/ci-natives/natives-linux-x64-modern/pi_natives.linux-x64-modern.node"
-         # Only main saves: an entry saved on any other ref is readable by
-         # that ref alone yet counts against the shared 10 GB repo quota,
-         # whose LRU eviction has already cost the darwin release archives.
-         # Probe first so an existing entry is not re-uploaded, then keep
-         # only the newest two entries so the footprint stays ~100 MB.
-         # The three steps below run only on main (never exercised by PR or
-         # branch runs) and are pure optimization for later PRs: a failure
-         # must never fail native_addons and with it every test job.
-         # PR runs restore this entry on GitHub-hosted runners, which read
-         # GitHub's cache; on vmon runners actions/cache goes to the node's
-         # local cache. The vmon runner hands GitHub's results URL to node
-         # actions (not run steps) as ACTIONS_RESULTS_ORL, so a script action
-         # looks it up and the probe and save below talk to GitHub.
-         - name: Locate GitHub's cache service
-           id: gh-results
-           if: ${{ 'pull_request' != 'pull_request' && github.ref == 'refs/heads/main' }}
-           uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
-           with:
-              script: core.setOutput("url", process.env.ACTIONS_RESULTS_ORL || process.env.ACTIONS_RESULTS_URL)
-         - name: Probe native addon cache entry
-           id: natives-cache-probe
-           if: ${{ 'pull_request' != 'pull_request' && github.ref == 'refs/heads/main' }}
-           continue-on-error: true
-           uses: actions/cache/restore@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-           env:
-              ACTIONS_RESULTS_URL: ${{ steps.gh-results.outputs.url }}
-           with:
-              path: ci-natives
-              key: ${{ steps.natives-key.outputs.key }}
-              lookup-only: true
-         - name: Save native addon cache entry
-           if: ${{ 'pull_request' != 'pull_request' && github.ref == 'refs/heads/main' && steps.natives-cache-probe.outputs.cache-hit != 'true' }}
-           continue-on-error: true
-           uses: actions/cache/save@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
-           env:
-              ACTIONS_RESULTS_URL: ${{ steps.gh-results.outputs.url }}
-           with:
-              path: ci-natives
-              key: ${{ steps.natives-key.outputs.key }}
-         - name: Prune superseded native addon cache entries
-           if: ${{ 'pull_request' != 'pull_request' && github.ref == 'refs/heads/main' && steps.natives-cache-probe.outputs.cache-hit != 'true' }}
-           continue-on-error: true
-           shell: bash
-           env:
-              GH_TOKEN: ${{ github.token }}
-              PREFIX: ${{ steps.natives-key.outputs.prefix }}
-           run: |
-              # Best-effort: a failed prune leaves eviction to GitHub's LRU.
-              gh cache list --repo "$GITHUB_REPOSITORY" --ref refs/heads/main --key "$PREFIX" \
-                  --sort created_at --order desc --limit 100 --json id --jq '.[2:][].id' \
-                | while read -r id; do
-                    gh cache delete "$id" --repo "$GITHUB_REPOSITORY" || true
-                  done || true
-
          - name: Upload linux-x64 native addon artifact
            uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
            with:
@@ -348,7 +195,7 @@ jobs:
       steps:
          - uses: actions/checkout@v4
            with:
-              ref: ab12a81dfab8b9587d69171a5c7733a0c941f7f0
+              ref: 0effc480062206bb4e9d81e60f2f853ae1e63f59
          - uses: ./.github/actions/bun-install
          - uses: ./.github/actions/native-artifacts
            with:
@@ -368,7 +215,7 @@ jobs:
       steps:
          - uses: actions/checkout@v4
            with:
-              ref: ab12a81dfab8b9587d69171a5c7733a0c941f7f0
+              ref: 0effc480062206bb4e9d81e60f2f853ae1e63f59
          - uses: ./.github/actions/bun-install
          - uses: ./.github/actions/native-artifacts
            with:
@@ -387,7 +234,7 @@ jobs:
       steps:
          - uses: actions/checkout@v4
            with:
-              ref: ab12a81dfab8b9587d69171a5c7733a0c941f7f0
+              ref: 0effc480062206bb4e9d81e60f2f853ae1e63f59
          - uses: ./.github/actions/bun-install
          - uses: ./.github/actions/native-artifacts
            with:
@@ -406,7 +253,7 @@ jobs:
       steps:
          - uses: actions/checkout@v4
            with:
-              ref: ab12a81dfab8b9587d69171a5c7733a0c941f7f0
+              ref: 0effc480062206bb4e9d81e60f2f853ae1e63f59
          - uses: ./.github/actions/bun-install
          - uses: ./.github/actions/native-artifacts
            with:
@@ -427,7 +274,7 @@ jobs:
       steps:
          - uses: actions/checkout@v4
            with:
-              ref: ab12a81dfab8b9587d69171a5c7733a0c941f7f0
+              ref: 0effc480062206bb4e9d81e60f2f853ae1e63f59
          - uses: ./.github/actions/bun-install
          - uses: ./.github/actions/native-artifacts
            with:
@@ -446,7 +293,7 @@ jobs:
       steps:
          - uses: actions/checkout@v4
            with:
-              ref: ab12a81dfab8b9587d69171a5c7733a0c941f7f0
+              ref: 0effc480062206bb4e9d81e60f2f853ae1e63f59
          - uses: ./.github/actions/bun-install
          - uses: ./.github/actions/native-artifacts
            with:
@@ -467,7 +314,7 @@ jobs:
       steps:
          - uses: actions/checkout@v4
            with:
-              ref: ab12a81dfab8b9587d69171a5c7733a0c941f7f0
+              ref: 0effc480062206bb4e9d81e60f2f853ae1e63f59
          - uses: ./.github/actions/bun-install
          - uses: ./.github/actions/native-artifacts
            with:
@@ -483,7 +330,7 @@ jobs:
       steps:
          - uses: actions/checkout@v4
            with:
-              ref: ab12a81dfab8b9587d69171a5c7733a0c941f7f0
+              ref: 0effc480062206bb4e9d81e60f2f853ae1e63f59
          - uses: ./.github/actions/bun-install
          - uses: ./.github/actions/native-artifacts
            with:
