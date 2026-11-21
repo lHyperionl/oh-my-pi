@@ -5,22 +5,22 @@
 mod common;
 
 use common::{DiskWriter, Workspace};
-use omp_edit::{ApplyRequest, EditError, EditMode, FileOp, UrlResolution, session::PreviewBatch};
+use omp_edit::{
+	ApplyRequest, EditError, EditMode, EditResult, EditWriter, FileOp, UrlResolution, WriteRequest,
+	WriteResponse, session::PreviewBatch,
+};
 
 #[derive(Default)]
 struct RemoteWriter {
-	requests: parking_lot::Mutex<Vec<pi_edit::WriteRequest>>,
+	requests: parking_lot::Mutex<Vec<WriteRequest>>,
 }
 
 #[async_trait::async_trait]
-impl pi_edit::EditWriter for RemoteWriter {
-	async fn write(
-		&self,
-		request: pi_edit::WriteRequest,
-	) -> pi_edit::EditResult<pi_edit::WriteResponse> {
+impl EditWriter for RemoteWriter {
+	async fn write(&self, request: WriteRequest) -> EditResult<WriteResponse> {
 		let written = request.content.clone().expect("remote update content");
 		self.requests.lock().push(request);
-		Ok(pi_edit::WriteResponse { written, diagnostics_json: None })
+		Ok(WriteResponse { written, diagnostics_json: None })
 	}
 }
 
