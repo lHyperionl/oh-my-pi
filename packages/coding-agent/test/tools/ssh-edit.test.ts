@@ -89,7 +89,7 @@ describe("SSH read/edit snapshots (#12125)", () => {
 			expect(unseen.isError).toBe(true);
 			expect(remoteText).toBe(original);
 			const raw = await read.execute("raw-other-scheme", { path: `${url}:raw:40-40` });
-			expect(textOf(raw)).toBe("line 40");
+			expect(textOf(raw)).toBe("line 40\n");
 			const edited = await edit.execute("edit-other-scheme", params);
 			expect(edited.isError, textOf(edited)).not.toBe(true);
 			expect(remoteText).toBe(original.replace("line 40\n", "BETA\n"));
@@ -445,7 +445,7 @@ describe("SSH read/edit snapshots (#12125)", () => {
 		expect(unseen.isError).toBe(true);
 		expect(fileTransfer.writeRemoteFile).not.toHaveBeenCalled();
 		const raw = await read.execute("raw", { path: `${URL}:raw:40-40,70-70,100-100` });
-		expect(textOf(raw)).toBe("line 40\nline 70");
+		expect(textOf(raw)).toBe("line 40\nline 70\n");
 		expect(raw.details?.notes?.join("\n")).toContain("beyond end");
 		const seen = await edit.execute("seen", { input: `${header}\nPUT 40.=40:\n+seen` });
 		expect(seen.isError).not.toBe(true);
