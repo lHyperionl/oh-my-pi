@@ -5,8 +5,10 @@
 ### Added
 
 - Added native edit support for host-owned text resources with explicit hosted write routing and move validation (by [@lHyperionl](https://github.com/lHyperionl)).
-
 - Hosted hashline previews use retained snapshots, with a live-text fallback when the supplied tag matches.
+### Changed
+
+- The Rust edit API now uses typed disk locations and explicit URL resolution results ([#19356](https://github.com/can1357/oh-my-pi/pull/19356) by [@lHyperionl](https://github.com/lHyperionl))
 
 ### Fixed
 
