@@ -1,7 +1,7 @@
 //! Streaming section previews
 //! (`packages/coding-agent/src/edit/hashline/diff.ts`).
 
-use std::borrow::Cow;
+use std::{borrow::Cow, sync::Arc};
 
 use super::{
 	apply::EmptyPaste,
@@ -9,14 +9,15 @@ use super::{
 	clipboard::resolve_clipboard_edits,
 	input::{Patch, PatchSection, contains_recognizable_hashline_operations},
 	parser::parse_patch_streaming,
-	patcher::{apply_with_recovery, mismatch, recover_target},
+	patcher::{apply_with_recovery, mismatch, preview_mismatch, recover_target},
 	types::{Cursor, Edit, FileOp},
 };
 use crate::{
 	diff_string::{BlockContextSource, generate_diff_string},
 	engine::{FileOp as EngineFileOp, PreviewFile},
-	files::FileSource,
-	store::{Clipboard, EditStore},
+	error::EditError,
+	files::{FileRead, FileSource},
+	store::{Clipboard, EditStore, file_hash},
 };
 
 fn cursor_line(cursor: Cursor, file_line_count: usize) -> u32 {
@@ -118,6 +119,42 @@ fn streaming_diff(
 	}
 }
 
+enum PreviewBase<'a> {
+	Live(&'a str),
+	Historical(Arc<str>),
+}
+
+impl AsRef<str> for PreviewBase<'_> {
+	fn as_ref(&self) -> &str {
+		match self {
+			Self::Live(text) => text,
+			Self::Historical(text) => text,
+		}
+	}
+}
+
+fn preview_base<'a>(
+	section: &PatchSection,
+	read: &'a FileRead,
+	store: &EditStore,
+) -> Result<PreviewBase<'a>, EditError> {
+	if !read.canonical.is_hosted() {
+		return Ok(PreviewBase::Live(&read.text));
+	}
+	let tag = section.file_hash.as_deref();
+	let snapshot = match tag {
+		Some(tag) => store.by_hash(&read.canonical, tag),
+		None => store.head(&read.canonical),
+	};
+	if let Some(snapshot) = snapshot {
+		return Ok(PreviewBase::Historical(snapshot.text));
+	}
+	if tag.is_some_and(|tag| tag == file_hash(&read.text)) {
+		return Ok(PreviewBase::Live(&read.text));
+	}
+	Err(preview_mismatch(section, &read.canonical, &read.text, tag.unwrap_or(""), store))
+}
+
 fn preview_section(
 	section: &PatchSection,
 	streaming: bool,
@@ -159,9 +196,11 @@ fn preview_section(
 			},
 			Err(err) => return Err(err),
 		};
+		let base = preview_base(target, &read, store)?;
+		let text = base.as_ref();
 		if streaming {
-			let (diff, first, file_op) = streaming_diff(target, &read.text, clipboard)
-				.map_err(crate::error::EditError::apply)?;
+			let (diff, first, file_op) =
+				streaming_diff(target, text, clipboard).map_err(crate::error::EditError::apply)?;
 			result.diff = Some(diff);
 			result.first_changed_line = first;
 			result.op = Some(if matches!(file_op, Some(FileOp::Rem)) {
@@ -173,18 +212,16 @@ fn preview_section(
 		}
 		let parsed = target.parse()?;
 		if target.file_hash.is_none() {
-			return Err(mismatch(target, &read.canonical, &read.text, "", store));
+			let report = if read.canonical.is_hosted() {
+				preview_mismatch
+			} else {
+				mismatch
+			};
+			return Err(report(target, &read.canonical, text, "", store));
 		}
 		// A `REM` section holds only bodyless `CUT`s, which still fill registers.
-		let applied = apply_with_recovery(
-			target,
-			&read.canonical,
-			&read.text,
-			&parsed.edits,
-			clipboard,
-			store,
-			None,
-		)?;
+		let applied =
+			apply_with_recovery(target, &read.canonical, text, &parsed.edits, clipboard, store, None)?;
 		result.op = Some(if matches!(parsed.file_op, Some(FileOp::Rem)) {
 			EngineFileOp::Delete
 		} else {
@@ -194,7 +231,7 @@ fn preview_section(
 			Some(FileOp::Move { dest }) => Some(dest.clone()),
 			_ => None,
 		};
-		if applied.text == read.text || matches!(parsed.file_op, Some(FileOp::Rem)) {
+		if applied.text == text || matches!(parsed.file_op, Some(FileOp::Rem)) {
 			if parsed.file_op.is_some() {
 				result.diff = Some(String::new());
 				return Ok(());
@@ -204,7 +241,7 @@ fn preview_section(
 				target.path
 			)));
 		}
-		let diff = generate_diff_string(&read.text, &applied.text, None, &BlockContextSource {
+		let diff = generate_diff_string(text, &applied.text, None, &BlockContextSource {
 			path:      Some(&target.path),
 			lang:      None,
 			streaming: false,

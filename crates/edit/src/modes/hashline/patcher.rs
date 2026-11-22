@@ -104,16 +104,29 @@ pub(crate) fn mismatch(
 	expected: &str,
 	store: &EditStore,
 ) -> EditError {
-	let actual = file_hash(normalized);
-	let file_lines: Vec<String> = normalized.split('\n').map(str::to_owned).collect();
+	let line_count = normalized.split('\n').count();
 	let anchor_lines = section.collect_anchor_lines().unwrap_or_default();
 	// The reply hands back the current tag and prints the rows around each
 	// anchor in full, so those rows count as seen for a resend under it.
 	record_reply_provenance(store, canonical, normalized, || {
-		super::messages::anchored_context_lines(&anchor_lines, file_lines.len())
+		super::messages::anchored_context_lines(&anchor_lines, line_count)
 			.into_iter()
 			.collect()
 	});
+	preview_mismatch(section, canonical, normalized, expected, store)
+}
+
+/// Build the mismatch without treating preview rows as a model-visible read.
+pub(crate) fn preview_mismatch(
+	section: &PatchSection,
+	canonical: &Location,
+	normalized: &str,
+	expected: &str,
+	store: &EditStore,
+) -> EditError {
+	let actual = file_hash(normalized);
+	let file_lines = normalized.split('\n').map(str::to_owned).collect();
+	let anchor_lines = section.collect_anchor_lines().unwrap_or_default();
 	// When the tag isn't from this exact path, list the other paths in this
 	// session that *did* issue the same tag — so the rejection can name the
 	// file the tag was actually for and the model doesn't follow a wrong-tree

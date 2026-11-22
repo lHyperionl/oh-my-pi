@@ -275,6 +275,124 @@ async fn final_apply_patch_preview_stops_at_the_first_pending_section() {
 	assert!(writer.requests.lock().is_empty());
 }
 
+#[tokio::test]
+async fn local_missing_tag_preview_records_seen_lines_for_a_resend() {
+	let mut ws = Workspace::new(EditMode::Hashline);
+	ws.config.enforce_seen_lines = true;
+	let before = (1..=40)
+		.map(|line| format!("line {line}\n"))
+		.collect::<String>();
+	ws.write("a.txt", &before);
+	let mut session = ws.session();
+	session.set_args_json(
+		&serde_json::json!({ "input": "[a.txt]\nPUT 30.=30:\n+changed\n" }).to_string(),
+	);
+	session.finish();
+	let preview = session.preview();
+	let tag = omp_edit::store::file_hash(&before);
+	assert!(
+		preview.files[0]
+			.error
+			.as_ref()
+			.is_some_and(|error| error.contains(&tag)),
+		"{preview:?}"
+	);
+	let writer = DiskWriter::default();
+	ws.apply_json(
+		&serde_json::json!({ "input": format!("[a.txt#{tag}]\nPUT 30.=30:\n+changed\n") }),
+		&writer,
+	)
+	.await
+	.expect("the mismatch preview displayed line 30");
+	assert_eq!(ws.read("a.txt").as_deref(), Some(before.replace("line 30\n", "changed\n").as_str()));
+}
+
+#[test]
+fn final_hashline_batch_keeps_the_last_section_error_hidden_for_refused_urls() {
+	let mut ws = Workspace::new(EditMode::Hashline);
+	ws.config.policy.url_schemes = vec!["skill".into()];
+	ws.write("a.txt", "before\n");
+	let tag = omp_edit::store::file_hash("before\n");
+	let url = "skill://x";
+	let mut session = ws.session();
+	let input = format!("[a.txt#{tag}]\nPUT 1.=1:\n+after\n[{url}#AB12]\nPUT 1.=1:\n+other\n");
+	session.set_args_json(&serde_json::json!({ "input": input }).to_string());
+	session.finish();
+	session.provide(url.into(), UrlAnswer::Refused("read-only URL".into()));
+	let preview = session.preview();
+	assert_eq!(preview.files.len(), 1, "{preview:?}");
+	assert_eq!(preview.files[0].display, "a.txt");
+	assert!(preview.files[0].diff.is_some(), "{preview:?}");
+}
+
+#[tokio::test]
+async fn hosted_hashline_preview_accepts_the_live_hash_without_a_snapshot() {
+	let mut ws = Workspace::new(EditMode::Hashline);
+	ws.config.policy.url_schemes = vec!["ssh".into()];
+	let url = "ssh://host/notes.txt";
+	let key = omp_edit::Location::Hosted(hosted_key(url));
+	let live = "alpha\n";
+	let tag = omp_edit::store::file_hash(live);
+	let mut session = ws.session();
+	let input = format!("[{url}#{tag}]\nPUT 1.=1:\n+ALPHA\n");
+	session.set_args_json(&serde_json::json!({ "input": input }).to_string());
+	session.finish();
+	session.provide(url.into(), remote_answer(url, Some(live)));
+	let preview = session.preview();
+	assert!(preview.files[0].diff.is_some(), "{preview:?}");
+	assert!(preview.files[0].error.is_none(), "{preview:?}");
+	assert!(ws.store.head(&key).is_none());
+	assert_eq!(session.begin_apply_url_targets(), [url]);
+	session.provide(url.into(), remote_answer(url, Some(live)));
+	let writer = HostedWriter::default();
+	session
+		.apply(ApplyRequest::default(), &writer)
+		.await
+		.unwrap();
+	assert_eq!(writer.requests.lock()[0].content.as_deref(), Some("ALPHA\n"));
+}
+
+#[test]
+fn hosted_hashline_preview_prefers_a_matching_retained_snapshot() {
+	let mut ws = Workspace::new(EditMode::Hashline);
+	ws.config.policy.url_schemes = vec!["ssh".into()];
+	let url = "ssh://host/notes.txt";
+	let key = omp_edit::Location::Hosted(hosted_key(url));
+	let tag = ws.store.record(&key, "alpha\nbeta\n", None);
+	ws.store.record(&key, "different head\nbeta\n", None);
+	for streaming in [true, false] {
+		let mut session = ws.session();
+		let input = format!("[{url}#{tag}]\nPUT 1.=1:\n+ALPHA\n");
+		session.set_args_json(&serde_json::json!({ "input": input }).to_string());
+		if !streaming {
+			session.finish();
+		}
+		session.provide(url.into(), remote_answer(url, Some("different checkout\nbeta\n")));
+		let preview = session.preview();
+		let diff = preview.files[0].diff.as_deref().expect("historical diff");
+		assert!(
+			diff.contains("alpha") && diff.contains("ALPHA") && !diff.contains("different"),
+			"{diff}"
+		);
+	}
+}
+
+#[test]
+fn hosted_hashline_preview_does_not_record_a_mismatched_live_snapshot() {
+	let mut ws = Workspace::new(EditMode::Hashline);
+	ws.config.policy.url_schemes = vec!["ssh".into()];
+	let url = "ssh://host/notes.txt";
+	let key = omp_edit::Location::Hosted(hosted_key(url));
+	let mut session = ws.session();
+	let input = format!("[{url}#AB12]\nPUT 1.=1:\n+ALPHA\n");
+	session.set_args_json(&serde_json::json!({ "input": input }).to_string());
+	session.finish();
+	session.provide(url.into(), remote_answer(url, Some("alpha\n")));
+	let preview = session.preview();
+	assert!(preview.files[0].error.is_some() && preview.files[0].diff.is_none(), "{preview:?}");
+	assert!(ws.store.head(&key).is_none());
+}
+
 const SOURCE: &str = "fn main() {\n    let x = 1;\n    println!(\"{x}\");\n}\n";
 
 fn sloppy_payload(path: &str) -> String {
