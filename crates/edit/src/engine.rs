@@ -105,7 +105,7 @@ impl HostedKey {
 		&self.0
 	}
 
-	pub(crate) fn capacity(&self) -> usize {
+	pub(crate) const fn capacity(&self) -> usize {
 		self.0.capacity()
 	}
 
