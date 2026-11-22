@@ -68,11 +68,61 @@ impl FileOp {
 	}
 }
 
-/// A resolved local filesystem location.
+/// A validated, opaque host resource key.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct HostedKey(String);
+
+impl HostedKey {
+	/// Validate the resource URL without changing its spelling.
+	///
+	/// # Errors
+	/// Rejects keys without a scheme, authority, and absolute path.
+	pub fn new(key: String) -> Result<Self, EditError> {
+		let valid = key.split_once("://").is_some_and(|(scheme, rest)| {
+			scheme.len() > 1
+				&& !scheme.eq_ignore_ascii_case("file")
+				&& scheme.as_bytes()[0].is_ascii_alphabetic()
+				&& scheme
+					.bytes()
+					.all(|b| b.is_ascii_alphanumeric() || matches!(b, b'+' | b'-' | b'.'))
+				&& rest
+					.split_once('/')
+					.is_some_and(|(authority, _)| !authority.is_empty())
+				&& !key.bytes().any(|b| {
+					b.is_ascii_control() || b.is_ascii_whitespace() || matches!(b, b'\\' | b'?' | b'#')
+				})
+		});
+		if !valid {
+			return Err(EditError::apply(
+				"Hosted edit keys must be canonical resource URLs such as ssh://host/absolute-path",
+			));
+		}
+		Ok(Self(key))
+	}
+
+	/// The canonical identity supplied by the host.
+	pub fn as_str(&self) -> &str {
+		&self.0
+	}
+
+	pub(crate) fn capacity(&self) -> usize {
+		self.0.capacity()
+	}
+
+	fn store(&self) -> &str {
+		let (scheme, rest) = self.0.split_once("://").expect("validated hosted scheme");
+		let (authority, _) = rest.split_once('/').expect("validated hosted path");
+		&self.0[..scheme.len() + 3 + authority.len()]
+	}
+}
+
+/// A resolved disk path or host resource.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Location {
 	/// A filesystem path.
 	Disk(PathBuf),
+	/// A host-owned resource.
+	Hosted(HostedKey),
 }
 
 impl Location {
@@ -80,6 +130,7 @@ impl Location {
 	pub fn disk_path(&self) -> Option<&Path> {
 		match self {
 			Self::Disk(path) => Some(path),
+			Self::Hosted(_) => None,
 		}
 	}
 
@@ -87,6 +138,7 @@ impl Location {
 	pub fn as_text(&self) -> Option<&str> {
 		match self {
 			Self::Disk(path) => path.to_str(),
+			Self::Hosted(key) => Some(key.as_str()),
 		}
 	}
 
@@ -94,6 +146,7 @@ impl Location {
 	pub fn display(&self) -> std::borrow::Cow<'_, str> {
 		match self {
 			Self::Disk(path) => path.to_string_lossy(),
+			Self::Hosted(key) => key.as_str().into(),
 		}
 	}
 
@@ -101,6 +154,7 @@ impl Location {
 	pub(crate) fn writer_path(&self) -> PathBuf {
 		match self {
 			Self::Disk(path) => path.clone(),
+			Self::Hosted(key) => PathBuf::from(key.as_str()),
 		}
 	}
 
@@ -108,12 +162,30 @@ impl Location {
 	pub fn canonical_key(&self) -> Self {
 		match self {
 			Self::Disk(path) => Self::Disk(crate::path_policy::canonical_key(path)),
+			Self::Hosted(_) => self.clone(),
 		}
 	}
 
 	pub(crate) fn capacity(&self) -> usize {
 		match self {
 			Self::Disk(path) => path.capacity(),
+			Self::Hosted(key) => key.capacity(),
+		}
+	}
+
+	/// Whether this location is owned by a host.
+	pub const fn is_hosted(&self) -> bool {
+		matches!(self, Self::Hosted(_))
+	}
+
+	pub(crate) fn check_move_to(&self, destination: &Self) -> Result<(), EditError> {
+		match (self, destination) {
+			(Self::Disk(_), Self::Disk(_)) => Ok(()),
+			(Self::Hosted(from), Self::Hosted(to)) if from.store() == to.store() => Ok(()),
+			_ => Err(EditError::apply(
+				"Cannot move between edit stores. Use separate operations within the source and \
+				 destination stores.",
+			)),
 		}
 	}
 

@@ -2,6 +2,10 @@
 
 ## [Unreleased]
 
+### Added
+
+- Added native edit support for host-owned text resources with explicit hosted write routing and move validation (by [@lHyperionl](https://github.com/lHyperionl)).
+
 ### Fixed
 
 - Fixed `grep()` with a match limit resolving with a short result when its directory walk panicked; it now rejects with the panic ([#20013](https://github.com/can1357/oh-my-pi/pull/20013) by [@sjawhar](https://github.com/sjawhar))

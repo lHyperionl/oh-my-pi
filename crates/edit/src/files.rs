@@ -24,14 +24,14 @@ use std::{
 };
 
 use crate::{
-	engine::{FileOp, Location, Resolved},
+	engine::{FileOp, HostedKey, Location, Resolved},
 	error::{EditError, EditResult, Rejection},
 	notebook,
 	path_policy::{PathPolicy, RecoveryGlob, UrlAnswer},
 	text::{LineEnding, detect_line_ending, normalize_to_lf, restore_line_endings, strip_bom},
 };
 
-/// One target file as read from disk plus its normalized editable form.
+/// One target file from disk or the host plus its normalized editable form.
 #[derive(Debug)]
 pub struct FileRead {
 	pub resolved:    Resolved,
@@ -85,7 +85,7 @@ pub trait FileSource {
 	/// answers them).
 	fn resolve(&mut self, authored: &str, must_exist: bool) -> EditResult<Resolved>;
 
-	/// Whether `location` exists on disk (file or directory).
+	/// Whether `location` exists on disk or has host-supplied content.
 	fn exists(&mut self, location: &Location) -> bool;
 
 	/// Read a target that must exist. Fails with `File not found: <display>`
@@ -141,10 +141,12 @@ fn stamp(absolute: &Path) -> Option<Stamp> {
 	})
 }
 
-/// Default [`FileSource`] backed by `std::fs`.
+/// Default [`FileSource`] backed by `std::fs` or host-supplied remote text.
 pub struct FileCache {
 	policy:          PathPolicy,
 	reads:           HashMap<PathBuf, (Stamp, Arc<FileRead>)>,
+	hosted_reads:    HashMap<HostedKey, Arc<FileRead>>,
+	hosted:          HashMap<HostedKey, Option<String>>,
 	/// Authored path → resolution (so paired hunks share one recovery).
 	resolutions:     HashMap<(String, bool), Resolved>,
 	/// Host answers keyed by [`PathPolicy::url_target`].
@@ -164,6 +166,8 @@ impl FileCache {
 		Self {
 			policy,
 			reads: HashMap::new(),
+			hosted_reads: HashMap::new(),
+			hosted: HashMap::new(),
 			resolutions: HashMap::new(),
 			urls: HashMap::new(),
 			unresolved: Vec::new(),
@@ -183,6 +187,12 @@ impl FileCache {
 		self
 			.reads
 			.retain(|_, (_, read)| !names_url(&read.resolved.display));
+		if let UrlAnswer::Hosted { key, content, .. } = &resolution {
+			// Every alias of this identity reads the new checkout. Other hosted
+			// identities and stamp-validated disk reads keep their caches.
+			self.hosted_reads.remove(key);
+			self.hosted.insert(key.clone(), content.clone());
+		}
 		self.unresolved.retain(|missed| *missed != url);
 		self.urls.insert(url, resolution);
 	}
@@ -216,6 +226,7 @@ impl FileCache {
 	pub fn forget_answers(&mut self) {
 		self.clear();
 		self.urls.clear();
+		self.hosted.clear();
 		self.unresolved.clear();
 		self.recovered.clear();
 		self.recovery_misses.clear();
@@ -230,26 +241,41 @@ impl FileCache {
 	}
 
 	fn read_resolved(&mut self, resolved: &Resolved) -> EditResult<Option<Arc<FileRead>>> {
-		let Location::Disk(path) = &resolved.location;
-		let Some(current) = stamp(path) else {
-			return Ok(None);
-		};
-		if let Some(kind) = current.special_kind {
-			return Err(EditError::apply(format!(
-				"Cannot edit '{}': it is a {kind}, not a regular file or directory.",
-				resolved.display
-			)));
-		}
-		if let Some((cached_stamp, read)) = self.reads.get(path)
-			&& *cached_stamp == current
-			&& read.resolved.display == resolved.display
-		{
-			return Ok(Some(Arc::clone(read)));
-		}
-		let bytes = match std::fs::read(path) {
-			Ok(bytes) => bytes,
-			Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-			Err(source) => return Err(EditError::Io { path: path.clone(), source }),
+		let (current, bytes) = match &resolved.location {
+			Location::Hosted(key) => {
+				if let Some(read) = self.hosted_reads.get(key)
+					&& read.resolved.display == resolved.display
+				{
+					return Ok(Some(Arc::clone(read)));
+				}
+				let Some(Some(content)) = self.hosted.get(key) else {
+					return Ok(None);
+				};
+				(None, content.as_bytes().to_vec())
+			},
+			Location::Disk(path) => {
+				let Some(current) = stamp(path) else {
+					return Ok(None);
+				};
+				if let Some(kind) = current.special_kind {
+					return Err(EditError::apply(format!(
+						"Cannot edit '{}': it is a {kind}, not a regular file or directory.",
+						resolved.display
+					)));
+				}
+				if let Some((cached, read)) = self.reads.get(path)
+					&& *cached == current
+					&& read.resolved.display == resolved.display
+				{
+					return Ok(Some(Arc::clone(read)));
+				}
+				let bytes = match std::fs::read(path) {
+					Ok(bytes) => bytes,
+					Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+					Err(source) => return Err(EditError::Io { path: path.clone(), source }),
+				};
+				(Some(current), bytes)
+			},
 		};
 		if let Some(message) = self
 			.policy
@@ -261,7 +287,9 @@ impl FileCache {
 			display:     resolved.display.clone(),
 			valid_up_to: err.utf8_error().valid_up_to(),
 		})?;
-		let is_notebook = notebook::is_notebook_path(path);
+		// Remote handlers expose UTF-8 text, including the raw JSON of notebooks.
+		// Keep the editable view identical to the view `read` snapshots.
+		let is_notebook = resolved.location.is_notebook();
 		let (bom, text) = if is_notebook {
 			let editable = notebook::notebook_to_editable_text(&raw, &resolved.display)
 				.map_err(|err| EditError::apply(err.to_string()))?;
@@ -284,9 +312,16 @@ impl FileCache {
 			text,
 			is_notebook,
 		});
-		self
-			.reads
-			.insert(path.clone(), (current, Arc::clone(&read)));
+		match &resolved.location {
+			Location::Disk(path) => {
+				if let Some(stamp) = current {
+					self.reads.insert(path.clone(), (stamp, Arc::clone(&read)));
+				}
+			},
+			Location::Hosted(key) => {
+				self.hosted_reads.insert(key.clone(), Arc::clone(&read));
+			},
+		}
 		Ok(Some(read))
 	}
 }
@@ -334,6 +369,7 @@ impl FileSource for FileCache {
 	fn exists(&mut self, location: &Location) -> bool {
 		match location {
 			Location::Disk(path) => stamp(path).is_some(),
+			Location::Hosted(key) => self.hosted.get(key).is_some_and(Option::is_some),
 		}
 	}
 
@@ -353,6 +389,7 @@ impl FileSource for FileCache {
 
 	fn clear(&mut self) {
 		self.reads.clear();
+		self.hosted_reads.clear();
 		self.resolutions.clear();
 	}
 }

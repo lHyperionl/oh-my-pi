@@ -41,7 +41,7 @@ use napi::{
 };
 use napi_derive::napi;
 use omp_edit::{
-	EditError, EditMode, EditResult, Location, PathPolicy, Resolved, Session, UrlAnswer,
+	EditError, EditMode, EditResult, HostedKey, Location, PathPolicy, Resolved, Session, UrlAnswer,
 	diff_string::{BlockContextSource, generate_diff_string},
 	modes::{hashline, sloppy},
 	path_policy::RecoveryGlob,
@@ -126,8 +126,12 @@ impl EditPolicy {
 /// Host answer for one internal URL (`resolveUrl`).
 #[napi(object)]
 pub struct EditUrlResolution {
-	/// Absolute backing file; null when no local file backs the URL.
+	/// Absolute backing file, or a canonical resource URL when hosted.
 	pub path:          Option<String>,
+	/// Whether the resolver owns this target instead of backing it on disk.
+	pub hosted:        Option<bool>,
+	/// Hosted text, omitted when the resource does not exist.
+	pub content:       Option<String>,
 	/// Model-facing refusal (read-only, disabled…); wins over `path`.
 	pub error:         Option<String>,
 	/// Writable while plan mode is active (sandbox-scoped scheme).
@@ -183,7 +187,9 @@ impl From<PreviewBatch> for EditPreviewBatch {
 /// Host write request; the host owns the bytes.
 #[napi(object)]
 pub struct EditWriteRequest {
-	/// Absolute path.
+	/// Whether the paths identify hosted resources.
+	pub hosted:       bool,
+	/// Absolute disk path or hosted resource key.
 	pub path:         String,
 	pub display_path: String,
 	/// `create` | `update` | `delete` | `move`.
@@ -216,7 +222,9 @@ pub struct EditApplyRequest {
 /// One file's apply outcome.
 #[napi(object)]
 pub struct EditFileOutcome {
-	/// Absolute path.
+	/// Whether the paths identify hosted resources.
+	pub hosted:             bool,
+	/// Absolute disk path or hosted resource key.
 	pub path:               String,
 	pub display_path:       String,
 	/// `create` | `update` | `delete`.
@@ -250,11 +258,18 @@ pub struct EditApplyOutcome {
 // Store
 // ═══════════════════════════════════════════════════════════════════════════
 
-fn store_key(path: &str) -> Location {
-	Location::Disk(PathBuf::from(path)).canonical_key()
+fn store_key(path: String, hosted: Option<bool>) -> Result<Location> {
+	if hosted == Some(true) {
+		HostedKey::new(path).map(Location::Hosted).map_err(reason)
+	} else {
+		Ok(Location::Disk(PathBuf::from(path)).canonical_key())
+	}
 }
 
 /// Session-scoped snapshots, clipboard registers, and the no-op loop guard.
+///
+/// Text-based methods take an explicit hosted flag for resource URLs. File
+/// reads and default keys use disk paths.
 #[napi]
 #[derive(Default)]
 pub struct EditStore {
@@ -276,12 +291,13 @@ impl EditStore {
 		absolute_path: String,
 		text: String,
 		seen_lines: Option<Vec<u32>>,
-	) -> String {
-		let key = store_key(&absolute_path);
+		hosted: Option<bool>,
+	) -> Result<String> {
+		let key = store_key(absolute_path, hosted)?;
 		let (_, body) = omp_edit::text::strip_bom(&text);
-		self
+		Ok(self
 			.inner
-			.record(&key, &normalize_to_lf(body), seen_lines.as_deref())
+			.record(&key, &normalize_to_lf(body), seen_lines.as_deref()))
 	}
 
 	/// Read `absolutePath` from disk and record it; null when the file is
@@ -300,66 +316,94 @@ impl EditStore {
 
 	/// Merge displayed lines into the snapshot tagged `tag`.
 	#[napi]
-	pub fn record_seen_lines(&self, absolute_path: String, tag: String, lines: Vec<u32>) {
+	pub fn record_seen_lines(
+		&self,
+		absolute_path: String,
+		tag: String,
+		lines: Vec<u32>,
+		hosted: Option<bool>,
+	) -> Result<()> {
 		self
 			.inner
-			.record_seen_lines(&store_key(&absolute_path), &tag, &lines);
+			.record_seen_lines(&store_key(absolute_path, hosted)?, &tag, &lines);
+		Ok(())
 	}
 
 	/// Merge the lines a hashline-formatted `body` displays into the
 	/// snapshot tagged `tag`.
 	#[napi]
-	pub fn record_seen_lines_from_body(&self, absolute_path: String, tag: String, body: String) {
+	pub fn record_seen_lines_from_body(
+		&self,
+		absolute_path: String,
+		tag: String,
+		body: String,
+		hosted: Option<bool>,
+	) -> Result<()> {
 		let lines = store::seen_lines_from_body(&body);
 		if !lines.is_empty() {
 			self
 				.inner
-				.record_seen_lines(&store_key(&absolute_path), &tag, &lines);
+				.record_seen_lines(&store_key(absolute_path, hosted)?, &tag, &lines);
 		}
+		Ok(())
 	}
 
 	/// Latest recorded text for `absolutePath`.
 	#[napi]
-	pub fn head_text(&self, absolute_path: String) -> Option<String> {
-		self
+	pub fn head_text(&self, absolute_path: String, hosted: Option<bool>) -> Result<Option<String>> {
+		Ok(self
 			.inner
-			.head(&store_key(&absolute_path))
-			.map(|s| s.text.to_string())
+			.head(&store_key(absolute_path, hosted)?)
+			.map(|s| s.text.to_string()))
 	}
 
 	/// Latest recorded tag for `absolutePath`.
 	#[napi]
-	pub fn head_hash(&self, absolute_path: String) -> Option<String> {
-		self.inner.head_hash(&store_key(&absolute_path))
+	pub fn head_hash(&self, absolute_path: String, hosted: Option<bool>) -> Result<Option<String>> {
+		Ok(self.inner.head_hash(&store_key(absolute_path, hosted)?))
 	}
 
 	/// Recorded text of `absolutePath` tagged `hash`.
 	#[napi]
-	pub fn by_hash_text(&self, absolute_path: String, hash: String) -> Option<String> {
-		self
+	pub fn by_hash_text(
+		&self,
+		absolute_path: String,
+		hash: String,
+		hosted: Option<bool>,
+	) -> Result<Option<String>> {
+		Ok(self
 			.inner
-			.by_hash(&store_key(&absolute_path), &hash)
-			.map(|s| s.text.to_string())
+			.by_hash(&store_key(absolute_path, hosted)?, &hash)
+			.map(|s| s.text.to_string()))
 	}
 
 	/// Displayed lines recorded for the snapshot tagged `hash`; null when no
 	/// provenance was recorded.
 	#[napi]
-	pub fn seen_lines(&self, absolute_path: String, hash: String) -> Option<Vec<u32>> {
+	pub fn seen_lines(
+		&self,
+		absolute_path: String,
+		hash: String,
+		hosted: Option<bool>,
+	) -> Result<Option<Vec<u32>>> {
+		Ok(self
+			.inner
+			.by_hash(&store_key(absolute_path, hosted)?, &hash)
+			.and_then(|s| s.seen_lines.map(|set| set.iter().copied().collect())))
+	}
+
+	#[napi]
+	pub fn invalidate(&self, absolute_path: String, hosted: Option<bool>) -> Result<()> {
+		self.inner.invalidate(&store_key(absolute_path, hosted)?);
+		Ok(())
+	}
+
+	#[napi]
+	pub fn relocate(&self, from: String, to: String, hosted: Option<bool>) -> Result<()> {
 		self
 			.inner
-			.by_hash(&store_key(&absolute_path), &hash)
-			.and_then(|s| s.seen_lines.map(|set| set.iter().copied().collect()))
-	}
-
-	#[napi]
-	pub fn invalidate(&self, absolute_path: String) {
-		self.inner.invalidate(&store_key(&absolute_path));
-	}
-
-	#[napi]
-	pub fn relocate(&self, from: String, to: String) {
-		self.inner.relocate(&store_key(&from), &store_key(&to));
+			.relocate(&store_key(from, hosted)?, &store_key(to, hosted)?);
+		Ok(())
 	}
 
 	#[napi]
@@ -493,6 +537,7 @@ impl EditWriter for TsfnWriter {
 			request.op.as_str()
 		};
 		let payload = EditWriteRequest {
+			hosted:       request.hosted,
 			path:         request.absolute.to_string_lossy().into_owned(),
 			display_path: request.display,
 			op:           op.to_owned(),
@@ -523,20 +568,38 @@ async fn resolve_one(resolver: &ResolverCallback, url: &str) -> UrlAnswer {
 		Err(err) => Err(err),
 	};
 	match answer {
-		Ok(answer) => {
-			if let Some(error) = answer.error {
-				UrlAnswer::Refused(error)
-			} else if let Some(path) = answer.path {
-				UrlAnswer::Backed {
-					path:          PathBuf::from(path),
-					plan_writable: answer.plan_writable,
-				}
-			} else {
-				UrlAnswer::Refused(format!("No local file backs {url}"))
-			}
-		},
+		Ok(answer) => url_answer(url, answer),
 		Err(err) => UrlAnswer::Refused(err.reason),
 	}
+}
+
+fn url_answer(url: &str, answer: EditUrlResolution) -> UrlAnswer {
+	if let Some(error) = answer.error {
+		return UrlAnswer::Refused(error);
+	}
+	let Some(path) = answer.path else {
+		let kind = if answer.hosted == Some(true) {
+			"hosted key"
+		} else {
+			"local file"
+		};
+		return UrlAnswer::Refused(format!("No {kind} backs {url}"));
+	};
+	if answer.hosted == Some(true) {
+		return match HostedKey::new(path) {
+			Ok(key) => {
+				UrlAnswer::Hosted { key, content: answer.content, plan_writable: answer.plan_writable }
+			},
+			Err(error) => UrlAnswer::Refused(error.to_string()),
+		};
+	}
+	let path = PathBuf::from(path);
+	if !path.is_absolute() || answer.content.is_some() {
+		return UrlAnswer::Refused(format!(
+			"Invalid disk backing for {url}: expected an absolute path without hosted content"
+		));
+	}
+	UrlAnswer::Backed { path, plan_writable: answer.plan_writable }
 }
 
 /// The single file or directory below `cwd` whose path ends with the missing
@@ -744,6 +807,7 @@ impl EditSession {
 					.files
 					.into_iter()
 					.map(|file| EditFileOutcome {
+						hosted:             file.hosted,
 						path:               file.absolute.to_string_lossy().into_owned(),
 						display_path:       file.display,
 						op:                 file.op.as_str().to_owned(),
@@ -1100,6 +1164,43 @@ pub fn notebook_to_editable_text(json: String, display_path: String) -> Result<S
 #[cfg(test)]
 mod tests {
 	use super::*;
+
+	#[test]
+	fn hosted_keys_and_snapshots_require_an_explicit_hosted_flag() {
+		let path = "ssh://host/a//note.txt";
+		let answer = |hosted, path: &str| {
+			url_answer(path, EditUrlResolution {
+				path: Some(path.into()),
+				hosted,
+				content: Some("alpha\n".into()),
+				error: None,
+				plan_writable: false,
+			})
+		};
+		assert!(matches!(answer(None, path), UrlAnswer::Refused(_)));
+		assert!(matches!(answer(Some(true), "/a.txt"), UrlAnswer::Refused(_)));
+		assert!(matches!(answer(Some(true), "ssh:///a.txt"), UrlAnswer::Refused(_)));
+		assert!(
+			matches!(answer(Some(true), path), UrlAnswer::Hosted { key, .. } if key.as_str() == path)
+		);
+		let store = EditStore::new();
+		let tag = store
+			.record_snapshot(path.into(), "alpha\n".into(), None, Some(true))
+			.unwrap();
+		assert_eq!(
+			store
+				.by_hash_text(path.into(), tag.clone(), Some(true))
+				.unwrap()
+				.as_deref(),
+			Some("alpha\n")
+		);
+		assert!(
+			store
+				.by_hash_text(path.into(), tag, None)
+				.unwrap()
+				.is_none()
+		);
+	}
 
 	/// A fresh directory removed on drop.
 	struct Scratch(PathBuf);

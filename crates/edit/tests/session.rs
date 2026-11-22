@@ -5,7 +5,180 @@
 mod common;
 
 use common::{DiskWriter, Workspace};
-use omp_edit::{ApplyRequest, EditError, EditMode, FileOp, UrlAnswer, session::PreviewBatch};
+use omp_edit::{
+	ApplyRequest, EditError, EditMode, FileOp, HostedKey, UrlAnswer, session::PreviewBatch,
+};
+
+fn hosted_key(url: &str) -> HostedKey {
+	HostedKey::new(url.to_owned()).unwrap()
+}
+
+fn remote_answer(url: &str, content: Option<&str>) -> UrlAnswer {
+	UrlAnswer::Hosted {
+		key:           hosted_key(url),
+		content:       content.map(str::to_owned),
+		plan_writable: false,
+	}
+}
+
+#[derive(Default)]
+struct HostedWriter {
+	requests: parking_lot::Mutex<Vec<omp_edit::WriteRequest>>,
+}
+
+#[async_trait::async_trait]
+impl omp_edit::EditWriter for HostedWriter {
+	async fn write(
+		&self,
+		request: omp_edit::WriteRequest,
+	) -> omp_edit::EditResult<omp_edit::WriteResponse> {
+		let written = request.content.clone().unwrap_or_default();
+		self.requests.lock().push(request);
+		Ok(omp_edit::WriteResponse { written, diagnostics_json: None })
+	}
+}
+
+#[tokio::test]
+async fn hosted_patch_uses_typed_writes_and_preserves_opaque_keys() {
+	let first = "ssh://host/a//note.txt";
+	let second = "ssh://host/a/note.txt";
+	let mut ws = Workspace::new(EditMode::ApplyPatch);
+	ws.config.policy.url_schemes = vec!["ssh".into()];
+	let mut session = ws.session();
+	let input = format!(
+		"*** Begin Patch\n*** Update File: {first}\n@@\n-first\n+FIRST\n*** Update File: \
+		 {second}\n@@\n-second\n+SECOND\n*** End Patch"
+	);
+	session.set_args_json(&serde_json::json!({ "input": input }).to_string());
+	session.finish();
+	assert_eq!(session.begin_apply_url_targets(), [first, second]);
+	session.provide(first.into(), remote_answer(first, Some("first\n")));
+	session.provide(second.into(), remote_answer(second, Some("second\n")));
+	let writer = HostedWriter::default();
+	let outcome = session
+		.apply(ApplyRequest::default(), &writer)
+		.await
+		.unwrap();
+	let requests = writer.requests.lock();
+	assert_eq!(requests.len(), 2);
+	assert_eq!(requests[0].absolute.to_str(), Some(first));
+	assert_eq!(requests[0].content.as_deref(), Some("FIRST\n"));
+	assert_eq!(requests[1].absolute.to_str(), Some(second));
+	assert_eq!(requests[1].content.as_deref(), Some("SECOND\n"));
+	assert!(requests.iter().all(|request| request.hosted));
+	assert!(outcome.files.iter().all(|file| file.hosted));
+}
+
+#[tokio::test]
+async fn patch_moves_require_the_same_edit_store() {
+	let remote = "ssh://host/from.txt";
+	let same = "ssh://host/to.txt";
+	let other = "ssh://other/to.txt";
+	for (from, to, allowed) in [
+		("from.txt", "to.txt", true),
+		(remote, same, true),
+		("from.txt", same, false),
+		(remote, "to.txt", false),
+		(remote, other, false),
+	] {
+		let mut ws = Workspace::new(EditMode::ApplyPatch);
+		ws.config.policy.url_schemes = vec!["ssh".into()];
+		ws.write("from.txt", "before\n");
+		let mut session = ws.session();
+		let input = format!(
+			"*** Begin Patch\n*** Update File: {from}\n*** Move to: {to}\n@@\n-before\n+after\n*** \
+			 End Patch"
+		);
+		session.set_args_json(&serde_json::json!({ "input": input }).to_string());
+		session.finish();
+		for url in session.begin_apply_url_targets() {
+			let content = (url == remote).then_some("before\n");
+			session.provide(url.clone(), remote_answer(&url, content));
+		}
+		let writer = HostedWriter::default();
+		let result = session.apply(ApplyRequest::default(), &writer).await;
+		let requests = writer.requests.lock();
+		if allowed {
+			let outcome = result.unwrap();
+			assert_eq!(requests.len(), 1);
+			assert_eq!(requests[0].hosted, from == remote);
+			assert_eq!(outcome.files[0].hosted, from == remote);
+			assert!(requests[0].move_to.is_some());
+		} else {
+			assert!(
+				result
+					.unwrap_err()
+					.to_string()
+					.contains("Cannot move between edit stores")
+			);
+			assert!(requests.is_empty());
+		}
+	}
+}
+
+#[test]
+fn hosted_answers_refresh_aliases_without_touching_disk_reads() {
+	use omp_edit::files::{FileCache, FileSource};
+	let mut ws = Workspace::new(EditMode::Replace);
+	ws.config.policy.url_schemes = vec!["ssh".into()];
+	ws.write("local.txt", "disk\n");
+	let mut files = FileCache::new(ws.config.policy.clone());
+	let key = "ssh://host/a.ipynb";
+	let alias = "ssh://host/~/a.ipynb";
+	files.provide(key.into(), remote_answer(key, Some("old\n")));
+	let disk = files.read("local.txt").unwrap();
+	assert_eq!(files.read(key).unwrap().text, "old\n");
+	files.provide(alias.into(), remote_answer(key, Some("new\n")));
+	let read = files.read(key).unwrap();
+	assert_eq!(read.text, "new\n");
+	assert!(!read.is_notebook);
+	assert_eq!(read.canonical, omp_edit::Location::Hosted(hosted_key(key)));
+	assert!(std::sync::Arc::ptr_eq(&disk, &files.read("local.txt").unwrap()));
+}
+
+#[tokio::test]
+async fn hosted_create_keeps_notebooks_as_raw_json() {
+	let mut ws = Workspace::new(EditMode::ApplyPatch);
+	ws.config.policy.url_schemes = vec!["hosted".into()];
+	let mut session = ws.session();
+	session.set_args_json(r#"{"input":"*** Begin Patch\n*** Add File: hosted://account/new.ipynb\n+{\"cells\":[]}\n*** End Patch"}"#);
+	session.finish();
+	session.begin_apply_url_targets();
+	let key = "hosted://account/new.ipynb";
+	session.provide(key.into(), remote_answer(key, None));
+	let writer = HostedWriter::default();
+	session
+		.apply(ApplyRequest::default(), &writer)
+		.await
+		.expect("hosted create");
+	let requests = writer.requests.lock();
+	assert_eq!(requests[0].absolute.to_str(), Some(key));
+	assert_eq!(requests[0].content.as_deref(), Some("{\"cells\":[]}\n"));
+}
+
+#[tokio::test]
+async fn remote_apply_uses_fresh_host_text_even_when_its_length_is_unchanged() {
+	let url = "ssh://oracle/tmp/edit-repro.txt";
+	let mut ws = Workspace::new(EditMode::Replace);
+	ws.config.policy.url_schemes = vec!["ssh".into()];
+	let mut session = ws.session();
+	session.set_args_json(
+		&serde_json::json!({ "path": url, "old_string": "beta", "new_string": "BETA" }).to_string(),
+	);
+	session.finish();
+	session.provide(url.into(), remote_answer(url, Some("alpha\nbeta\n")));
+	assert!(session.preview().files[0].diff.is_some());
+	assert_eq!(session.begin_apply_url_targets(), [url]);
+	session.provide(url.into(), remote_answer(url, Some("delta\nbeta\n")));
+	let writer = HostedWriter::default();
+	session
+		.apply(ApplyRequest::default(), &writer)
+		.await
+		.expect("remote update");
+	let requests = writer.requests.lock();
+	assert_eq!(requests[0].absolute.to_str(), Some(url));
+	assert_eq!(requests[0].content.as_deref(), Some("delta\nBETA\n"));
+}
 
 const SOURCE: &str = "fn main() {\n    let x = 1;\n    println!(\"{x}\");\n}\n";
 

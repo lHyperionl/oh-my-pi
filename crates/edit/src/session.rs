@@ -56,6 +56,8 @@ pub struct PreviewBatch {
 /// Host write request. Rust never touches disk for writes.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WriteRequest {
+	/// Whether the writer should route this request to the host.
+	pub hosted:       bool,
 	pub absolute:     PathBuf,
 	pub display:      String,
 	pub op:           FileOp,
@@ -94,6 +96,8 @@ pub struct ApplyRequest {
 /// Per-file apply outcome.
 #[derive(Debug, Clone)]
 pub struct FileOutcome {
+	/// Whether the returned paths identify hosted resources.
+	pub hosted:             bool,
 	pub absolute:           PathBuf,
 	pub display:            String,
 	pub op:                 FileOp,
@@ -367,6 +371,7 @@ impl Session {
 			} else {
 				writer
 					.write(WriteRequest {
+						hosted:       file.location.is_hosted(),
 						absolute:     file.location.writer_path(),
 						display:      file.display.clone(),
 						op:           file.op,
@@ -471,6 +476,7 @@ impl Session {
 			let (old_text, new_text, snapshots_pruned) = prune_snapshots(old_text, new_text);
 
 			files.push(FileOutcome {
+				hosted: file.location.is_hosted(),
 				absolute: file.location.writer_path(),
 				display: file.display.clone(),
 				op: file.op,
@@ -531,9 +537,10 @@ fn format_file_text(file: &StagedFile, header: &str) -> String {
 		let moved = file.move_to.as_ref().map(|m| {
 			// DEST resolves from cwd, not from the source's directory: name a
 			// move out of that directory absolutely so it cannot be misread.
-			let Location::Disk(source) = &file.location;
-			let Location::Disk(destination) = &m.location;
-			if source.parent() == destination.parent() {
+			if matches!(
+				(file.location.disk_path(), m.location.disk_path()),
+				(Some(source), Some(destination)) if source.parent() == destination.parent()
+			) {
 				format!("Moved to {}", m.display)
 			} else {
 				format!("Moved to {}", m.location.display())

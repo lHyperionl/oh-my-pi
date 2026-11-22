@@ -232,14 +232,19 @@ export declare class EditSession {
   close(): void
 }
 
-/** Session-scoped snapshots, clipboard registers, and the no-op loop guard. */
+/**
+ * Session-scoped snapshots, clipboard registers, and the no-op loop guard.
+ *
+ * Text-based methods take an explicit hosted flag for resource URLs. File
+ * reads and default keys use disk paths.
+ */
 export declare class EditStore {
   constructor()
   /**
    * Record `text` (any line endings) as the current snapshot of
    * `absolutePath` and return its 4-hex tag.
    */
-  recordSnapshot(absolutePath: string, text: string, seenLines?: Array<number> | undefined | null): string
+  recordSnapshot(absolutePath: string, text: string, seenLines?: Array<number> | undefined | null, hosted?: boolean | undefined | null): string
   /**
    * Read `absolutePath` from disk and record it; null when the file is
    * unreadable or larger than 64 MiB. Past 4 MiB only the tag is returned:
@@ -247,25 +252,25 @@ export declare class EditStore {
    */
   recordSnapshotFile(absolutePath: string, seenLines?: Array<number> | undefined | null): string | null
   /** Merge displayed lines into the snapshot tagged `tag`. */
-  recordSeenLines(absolutePath: string, tag: string, lines: Array<number>): void
+  recordSeenLines(absolutePath: string, tag: string, lines: Array<number>, hosted?: boolean | undefined | null): void
   /**
    * Merge the lines a hashline-formatted `body` displays into the
    * snapshot tagged `tag`.
    */
-  recordSeenLinesFromBody(absolutePath: string, tag: string, body: string): void
+  recordSeenLinesFromBody(absolutePath: string, tag: string, body: string, hosted?: boolean | undefined | null): void
   /** Latest recorded text for `absolutePath`. */
-  headText(absolutePath: string): string | null
+  headText(absolutePath: string, hosted?: boolean | undefined | null): string | null
   /** Latest recorded tag for `absolutePath`. */
-  headHash(absolutePath: string): string | null
+  headHash(absolutePath: string, hosted?: boolean | undefined | null): string | null
   /** Recorded text of `absolutePath` tagged `hash`. */
-  byHashText(absolutePath: string, hash: string): string | null
+  byHashText(absolutePath: string, hash: string, hosted?: boolean | undefined | null): string | null
   /**
    * Displayed lines recorded for the snapshot tagged `hash`; null when no
    * provenance was recorded.
    */
-  seenLines(absolutePath: string, hash: string): Array<number> | null
-  invalidate(absolutePath: string): void
-  relocate(from: string, to: string): void
+  seenLines(absolutePath: string, hash: string, hosted?: boolean | undefined | null): Array<number> | null
+  invalidate(absolutePath: string, hosted?: boolean | undefined | null): void
+  relocate(from: string, to: string, hosted?: boolean | undefined | null): void
   clear(): void
 }
 
@@ -2227,7 +2232,9 @@ export interface EditFileOpIntent {
 
 /** One file's apply outcome. */
 export interface EditFileOutcome {
-  /** Absolute path. */
+  /** Whether the paths identify hosted resources. */
+  hosted: boolean
+  /** Absolute disk path or hosted resource key. */
   path: string
   displayPath: string
   /** `create` | `update` | `delete`. */
@@ -2327,8 +2334,12 @@ export interface EditPreviewBatch {
 
 /** Host answer for one internal URL (`resolveUrl`). */
 export interface EditUrlResolution {
-  /** Absolute backing file; null when no local file backs the URL. */
+  /** Absolute backing file, or a canonical resource URL when hosted. */
   path?: string
+  /** Whether the resolver owns this target instead of backing it on disk. */
+  hosted?: boolean
+  /** Hosted text, omitted when the resource does not exist. */
+  content?: string
   /** Model-facing refusal (read-only, disabled…); wins over `path`. */
   error?: string
   /** Writable while plan mode is active (sandbox-scoped scheme). */
@@ -2337,7 +2348,9 @@ export interface EditUrlResolution {
 
 /** Host write request; the host owns the bytes. */
 export interface EditWriteRequest {
-  /** Absolute path. */
+  /** Whether the paths identify hosted resources. */
+  hosted: boolean
+  /** Absolute disk path or hosted resource key. */
   path: string
   displayPath: string
   /** `create` | `update` | `delete` | `move`. */

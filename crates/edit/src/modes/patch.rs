@@ -1456,6 +1456,7 @@ fn validate_rename(
 		return Ok(None);
 	};
 	let destination = files.resolve(rename, false)?;
+	source.location.check_move_to(&destination.location)?;
 	if destination.location == source.location {
 		return Err(EditError::apply("rename path is the same as source path"));
 	}
@@ -1842,6 +1843,9 @@ impl ModeEngine for PatchEngine {
 			let input = entry_input(path, entry, self.first_match)?;
 			if let Some(rename) = input.rename {
 				let destination = files.resolve(rename, false)?;
+				initial_resolved
+					.location
+					.check_move_to(&destination.location)?;
 				if destination.location == initial_resolved.location {
 					return Err(EditError::apply("rename path is the same as source path"));
 				}

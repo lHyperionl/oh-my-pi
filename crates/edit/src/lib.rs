@@ -33,8 +33,8 @@ pub mod stream_json;
 pub mod text;
 
 pub use engine::{
-	EditMode, FileOp, FileOpIntent, HeaderKind, Inspection, Location, ModeEngine, PreviewFile,
-	Resolved, StagedFile,
+	EditMode, FileOp, FileOpIntent, HeaderKind, HostedKey, Inspection, Location, ModeEngine,
+	PreviewFile, Resolved, StagedFile,
 };
 pub use error::{EditError, EditResult, Rejection};
 pub use path_policy::{PathPolicy, UrlAnswer};

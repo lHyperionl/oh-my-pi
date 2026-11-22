@@ -761,7 +761,9 @@ pub(crate) fn recover_target(
 	files: &mut dyn FileSource,
 	store: &EditStore,
 ) -> Result<Option<(PatchSection, Resolved)>, EditError> {
-	let Location::Disk(initial_path) = &initial.location;
+	let Some(initial_path) = initial.location.disk_path() else {
+		return Ok(None);
+	};
 	if files.exists(&initial.location) {
 		return Ok(None);
 	}
@@ -772,8 +774,12 @@ pub(crate) fn recover_target(
 	let mut candidates = store
 		.paths_with_hash(tag)
 		.into_iter()
-		.map(|Location::Disk(path)| path)
-		.filter(|path| path.file_name() == authored_name && path != initial_path)
+		.filter_map(|location| match location {
+			Location::Disk(path) if path.file_name() == authored_name && path != initial_path => {
+				Some(path)
+			},
+			_ => None,
+		})
 		.collect::<Vec<_>>();
 	candidates.sort();
 	candidates.dedup();
@@ -952,6 +958,10 @@ fn stage_section(
 	}
 	if let Some(FileOp::Move { dest }) = &parsed.file_op {
 		let destination = files.resolve(dest, false)?;
+		read
+			.resolved
+			.location
+			.check_move_to(&destination.location)?;
 		if destination.location.canonical_key() == read.canonical {
 			return Err(EditError::apply(format!("MV destination is the same as {}.", section.path)));
 		}
@@ -1076,7 +1086,9 @@ mod lifecycle {
 	use tempfile::TempDir;
 
 	use crate::{
-		EditMode, EditResult, EditWriter, Location, WriteRequest, WriteResponse,
+		EditMode, EditResult, EditWriter, HostedKey, Location, Resolved, WriteRequest, WriteResponse,
+		files::FileCache,
+		modes::hashline::input::{Patch, SplitOptions},
 		path_policy::{PathPolicy, canonical_key},
 		session::{ApplyRequest, Session, SessionConfig},
 		store::EditStore,
@@ -1187,6 +1199,46 @@ mod lifecycle {
 
 	fn all_seen(lines: usize) -> Vec<u32> {
 		(1..=lines as u32).collect()
+	}
+
+	#[test]
+	fn hosted_alias_cannot_retarget_a_local_snapshot() {
+		let mut ctx = Lifecycle::new("notes.txt", 1);
+		ctx.policy.cwd = ctx.dir.path().canonicalize().unwrap();
+		ctx.policy.home_dir.clone_from(&ctx.policy.cwd);
+		ctx.policy.plan_writable_roots.push(ctx.policy.cwd.clone());
+		let tag = ctx.read("notes.txt", &[1]);
+		ctx.store.record(
+			&Location::Hosted(HostedKey::new("ssh://host/another/notes.txt".into()).unwrap()),
+			&ctx.text("notes.txt"),
+			Some(&[1]),
+		);
+		let authored = "alias/notes.txt";
+		let section = Patch::parse_single(
+			&format!("[{authored}#{tag}]\nPUT 1.=1:\n+updated\n"),
+			&SplitOptions::default(),
+		)
+		.unwrap();
+		let mut files = FileCache::new(ctx.policy.clone());
+		// A FileSource may resolve an authored alias to a hosted identity.
+		// The resolved kind, rather than the alias's spelling, forbids recovery.
+		let hosted = Resolved {
+			display:  authored.into(),
+			location: Location::Hosted(HostedKey::new("ssh://host/home/u/notes.txt".into()).unwrap()),
+		};
+		assert!(
+			super::recover_target(&section, &hosted, &mut files, &ctx.store)
+				.unwrap()
+				.is_none()
+		);
+		let disk = Resolved {
+			display:  authored.into(),
+			location: Location::Disk(ctx.dir.path().join(authored)),
+		};
+		let (_, recovered) = super::recover_target(&section, &disk, &mut files, &ctx.store)
+			.unwrap()
+			.expect("disk aliases still recover inside the sandbox");
+		assert_eq!(recovered.location, Location::Disk(ctx.canonical("notes.txt")));
 	}
 
 	/// Full read, two inserted lines above, then a replace at the shifted

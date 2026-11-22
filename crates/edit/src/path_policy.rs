@@ -20,7 +20,7 @@ use omp_xfs::{FileType, pattern::Glob};
 use regex::Regex;
 
 use crate::{
-	engine::{FileOp, Location, Resolved},
+	engine::{FileOp, HostedKey, Location, Resolved},
 	error::{EditError, EditResult},
 };
 
@@ -30,13 +30,18 @@ pub enum UrlAnswer {
 	/// A local backing file; normal filesystem canonicalization and stamps
 	/// apply.
 	Backed { path: PathBuf, plan_writable: bool },
+	/// Host-owned text. Missing content denotes a missing resource.
+	Hosted { key: HostedKey, content: Option<String>, plan_writable: bool },
 	/// A model-facing host refusal, propagated verbatim.
 	Refused(String),
 }
 
 impl UrlAnswer {
 	const fn plan_writable(&self) -> bool {
-		matches!(self, Self::Backed { plan_writable: true, .. })
+		matches!(
+			self,
+			Self::Backed { plan_writable: true, .. } | Self::Hosted { plan_writable: true, .. }
+		)
 	}
 }
 
@@ -95,6 +100,7 @@ impl PathPolicy {
 					.ok_or_else(|| EditError::UnresolvedUrl(url.as_ref().to_owned()))?;
 				match resolution {
 					UrlAnswer::Backed { path, .. } => Location::Disk(path.clone()),
+					UrlAnswer::Hosted { key, .. } => Location::Hosted(key.clone()),
 					UrlAnswer::Refused(error) => return Err(EditError::apply(error.clone())),
 				}
 			},
