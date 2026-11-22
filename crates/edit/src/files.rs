@@ -78,6 +78,9 @@ pub fn persist_new(resolved: &Resolved, after_lf: &str) -> EditResult<String> {
 pub trait FileSource {
 	fn policy(&self) -> &PathPolicy;
 
+	/// Inspect an existing answer without recording a resolution miss.
+	fn url_answer(&self, authored: &str) -> Option<&UrlAnswer>;
+
 	/// Resolve an authored path without reading it. When `must_exist` and
 	/// the resolved file is missing, the host's unique-suffix recovery answer
 	/// may substitute a different display/location pair (never for internal
@@ -329,6 +332,10 @@ impl FileCache {
 impl FileSource for FileCache {
 	fn policy(&self) -> &PathPolicy {
 		&self.policy
+	}
+
+	fn url_answer(&self, authored: &str) -> Option<&UrlAnswer> {
+		self.urls.get(self.policy.url_target(authored)?.as_ref())
 	}
 
 	fn resolve(&mut self, authored: &str, must_exist: bool) -> EditResult<Resolved> {

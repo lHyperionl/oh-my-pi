@@ -297,6 +297,8 @@ impl StagedFile {
 /// One file's streamed diff preview.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct PreviewFile {
+	/// Host resolution awaits approval. The session suppresses these previews.
+	pub deferred:           bool,
 	/// Display path as authored (after recovery when the engine resolved it).
 	pub display:            String,
 	pub diff:               Option<String>,

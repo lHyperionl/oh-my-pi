@@ -316,6 +316,8 @@ impl Session {
 		let mut files = self
 			.engine
 			.preview(&snapshot, streaming, &mut self.files, &self.store);
+		// Pending host answers are not preview failures.
+		files.retain(|file| !file.deferred);
 		if streaming {
 			for file in &mut files {
 				if let Some(diff) = file.diff.take() {

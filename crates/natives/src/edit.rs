@@ -130,6 +130,8 @@ pub struct EditUrlResolution {
 	pub path:          Option<String>,
 	/// Whether the resolver owns this target instead of backing it on disk.
 	pub hosted:        Option<bool>,
+	/// Resolve only after execution approval.
+	pub deferred:      Option<bool>,
 	/// Hosted text, omitted when the resource does not exist.
 	pub content:       Option<String>,
 	/// Model-facing refusal (read-only, disabled…); wins over `path`.
@@ -576,6 +578,9 @@ async fn resolve_one(resolver: &ResolverCallback, url: &str) -> UrlAnswer {
 fn url_answer(url: &str, answer: EditUrlResolution) -> UrlAnswer {
 	if let Some(error) = answer.error {
 		return UrlAnswer::Refused(error);
+	}
+	if answer.deferred == Some(true) {
+		return UrlAnswer::Pending;
 	}
 	let Some(path) = answer.path else {
 		let kind = if answer.hosted == Some(true) {
@@ -1166,12 +1171,26 @@ mod tests {
 	use super::*;
 
 	#[test]
+	fn resolution_error_wins_over_pending() {
+		let answer = url_answer("ssh://host/notes.txt", EditUrlResolution {
+			path:          None,
+			hosted:        Some(true),
+			content:       None,
+			deferred:      Some(true),
+			error:         Some("Host denied the edit".into()),
+			plan_writable: false,
+		});
+		assert!(matches!(answer, UrlAnswer::Refused(message) if message == "Host denied the edit"));
+	}
+
+	#[test]
 	fn hosted_keys_and_snapshots_require_an_explicit_hosted_flag() {
 		let path = "ssh://host/a//note.txt";
 		let answer = |hosted, path: &str| {
 			url_answer(path, EditUrlResolution {
 				path: Some(path.into()),
 				hosted,
+				deferred: None,
 				content: Some("alpha\n".into()),
 				error: None,
 				plan_writable: false,

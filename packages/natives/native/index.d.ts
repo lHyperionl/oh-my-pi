@@ -2338,6 +2338,8 @@ export interface EditUrlResolution {
   path?: string
   /** Whether the resolver owns this target instead of backing it on disk. */
   hosted?: boolean
+  /** Resolve only after execution approval. */
+  deferred?: boolean
   /** Hosted text, omitted when the resource does not exist. */
   content?: string
   /** Model-facing refusal (read-only, disabled…); wins over `path`. */

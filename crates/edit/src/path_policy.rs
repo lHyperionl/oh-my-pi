@@ -32,6 +32,8 @@ pub enum UrlAnswer {
 	Backed { path: PathBuf, plan_writable: bool },
 	/// Host-owned text. Missing content denotes a missing resource.
 	Hosted { key: HostedKey, content: Option<String>, plan_writable: bool },
+	/// Resolution requires execution approval.
+	Pending,
 	/// A model-facing host refusal, propagated verbatim.
 	Refused(String),
 }
@@ -101,6 +103,7 @@ impl PathPolicy {
 				match resolution {
 					UrlAnswer::Backed { path, .. } => Location::Disk(path.clone()),
 					UrlAnswer::Hosted { key, .. } => Location::Hosted(key.clone()),
+					UrlAnswer::Pending => return Err(EditError::DeferredUrl(url.into_owned())),
 					UrlAnswer::Refused(error) => return Err(EditError::apply(error.clone())),
 				}
 			},

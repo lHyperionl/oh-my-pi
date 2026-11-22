@@ -180,6 +180,101 @@ async fn remote_apply_uses_fresh_host_text_even_when_its_length_is_unchanged() {
 	assert_eq!(requests[0].content.as_deref(), Some("delta\nBETA\n"));
 }
 
+#[test]
+fn streaming_apply_patch_never_queues_disk_backed_urls() {
+	let url = "local://plan.md";
+	let mut ws = Workspace::new(EditMode::ApplyPatch);
+	ws.config.policy.url_schemes = vec!["local".into()];
+	let mut session = ws.session();
+	let input = format!("*** Begin Patch\n*** Add File: {url}\n+plan\n");
+	session.set_args_json(&serde_json::json!({ "input": input }).to_string());
+	let preview = session.preview();
+	assert!(preview.streaming);
+	assert_eq!(preview.files.len(), 1, "{preview:?}");
+	assert_eq!(preview.files[0].display, url);
+	assert!(session.take_unresolved().is_empty());
+	session.provide(url.into(), UrlAnswer::Pending);
+	assert!(session.preview().files.is_empty());
+	assert!(session.take_unresolved().is_empty());
+}
+
+#[test]
+fn streaming_patch_omits_pending_targets_and_moves_to_pending_destinations() {
+	let url = "ssh://host/file.txt";
+	let destination = "ssh://host/destination.txt";
+	let mut ws = Workspace::new(EditMode::ApplyPatch);
+	ws.config.policy.url_schemes = vec!["ssh".into()];
+	let mut session = ws.session();
+	let input = format!(
+		"*** Begin Patch\n*** Update File: {url}\n@@\n-old\n+new\n*** Update File: move.txt\n*** \
+		 Move to: {destination}\n@@\n-before\n+after\n*** Update File: local.txt\n@@\n-old\n+local\n"
+	);
+	session.set_args_json(&serde_json::json!({ "input": input }).to_string());
+	assert_eq!(session.preview().files.len(), 3);
+	assert!(session.take_unresolved().is_empty());
+	session.provide(url.into(), UrlAnswer::Pending);
+	session.provide(destination.into(), UrlAnswer::Pending);
+	let preview = session.preview();
+	assert_eq!(preview.files.len(), 1, "{preview:?}");
+	assert_eq!(preview.files[0].display, "local.txt");
+	assert!(session.take_unresolved().is_empty());
+}
+
+#[tokio::test]
+async fn apply_patch_deleted_target_is_not_revived_by_a_later_section() {
+	let ws = Workspace::new(EditMode::ApplyPatch);
+	ws.write("a.txt", "old\n");
+	ws.write("b.txt", "before\n");
+	let writer = DiskWriter::default();
+	let error = ws
+		.apply_raw(
+			"*** Begin Patch\n*** Delete File: a.txt\n*** Update File: \
+			 b.txt\n@@\n-before\n+after\n*** Update File: a.txt\n@@\n-old\n+new\n*** End Patch",
+			&writer,
+		)
+		.await
+		.expect_err("a staged deletion must remain a tombstone");
+	assert!(error.to_string().contains("File not found"), "{error}");
+	assert!(writer.requests.lock().is_empty());
+	assert_eq!(ws.read("a.txt").as_deref(), Some("old\n"));
+	assert_eq!(ws.read("b.txt").as_deref(), Some("before\n"));
+}
+
+#[tokio::test]
+async fn final_apply_patch_preview_stops_at_the_first_pending_section() {
+	let url = "ssh://host/remote.txt";
+	let mut ws = Workspace::new(EditMode::ApplyPatch);
+	ws.config.policy.url_schemes = vec!["ssh".into()];
+	ws.write("first.txt", "one\n");
+	ws.write("last.txt", "three\n");
+	let input = format!(
+		"*** Begin Patch\n*** Update File: first.txt\n@@\n-one\n+ONE\n*** Update File: \
+		 {url}\n@@\n-two\n+TWO\n*** Update File: last.txt\n@@\n-three\n+THREE\n*** End Patch"
+	);
+	let mut session = ws.session();
+	session.set_args_json(&serde_json::json!({ "input": input }).to_string());
+	session.finish();
+	session.provide(url.into(), UrlAnswer::Pending);
+	let preview = session.preview();
+	assert_eq!(preview.files.len(), 1, "{preview:?}");
+	assert_eq!(preview.files[0].display, "first.txt");
+	session.provide(url.into(), remote_answer(url, Some("two\n")));
+	let preview = session.preview();
+	assert_eq!(preview.files.len(), 3, "{preview:?}");
+
+	assert_eq!(session.begin_apply_url_targets(), [url]);
+	session.provide(url.into(), UrlAnswer::Pending);
+	let writer = HostedWriter::default();
+	assert!(
+		session
+			.apply(ApplyRequest::default(), &writer)
+			.await
+			.unwrap_err()
+			.is_deferred()
+	);
+	assert!(writer.requests.lock().is_empty());
+}
+
 const SOURCE: &str = "fn main() {\n    let x = 1;\n    println!(\"{x}\");\n}\n";
 
 fn sloppy_payload(path: &str) -> String {
