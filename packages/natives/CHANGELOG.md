@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+### Changed
+
+- The Rust edit API now uses typed disk locations and explicit URL resolution results ([#19356](https://github.com/can1357/oh-my-pi/pull/19356) by [@lHyperionl](https://github.com/lHyperionl))
 ## [19.2.1] - 2026-11-25
 
 ### Added
