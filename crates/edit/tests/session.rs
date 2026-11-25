@@ -6,7 +6,7 @@ mod common;
 
 use common::{DiskWriter, Workspace};
 use omp_edit::{
-	ApplyRequest, EditError, EditMode, EditResult, EditWriter, FileOp, UrlResolution, WriteRequest,
+	ApplyRequest, EditError, EditMode, EditResult, EditWriter, FileOp, UrlAnswer, WriteRequest,
 	WriteResponse, session::PreviewBatch,
 };
 
@@ -24,14 +24,8 @@ impl EditWriter for RemoteWriter {
 	}
 }
 
-fn remote_answer(url: &str, content: &str) -> UrlResolution {
-	UrlResolution {
-		absolute:      Some(url.into()),
-		content:       Some(content.into()),
-		deferred:      false,
-		error:         None,
-		plan_writable: false,
-	}
+fn remote_answer(url: &str, content: &str) -> UrlAnswer {
+	UrlAnswer::Hosted { key: url.into(), content: content.into() }
 }
 
 #[tokio::test]
@@ -669,11 +663,8 @@ async fn internal_url_targets_wait_for_host_answers() {
 	assert_eq!(session.take_unresolved(), ["local://plan.md"]);
 	assert!(!session.preview_pending());
 
-	session.provide("local://plan.md".into(), UrlResolution {
-		absolute:      Some(backing.clone()),
-		content:       None,
-		deferred:      false,
-		error:         None,
+	session.provide("local://plan.md".into(), UrlAnswer::Backed {
+		path:          backing.clone(),
 		plan_writable: true,
 	});
 	assert!(session.preview_pending());
@@ -689,11 +680,8 @@ async fn internal_url_targets_wait_for_host_answers() {
 
 	session.finish();
 	assert_eq!(session.begin_apply_url_targets(), ["local://plan.md"]);
-	session.provide("local://plan.md".into(), UrlResolution {
-		absolute:      Some(backing.clone()),
-		content:       None,
-		deferred:      false,
-		error:         None,
+	session.provide("local://plan.md".into(), UrlAnswer::Backed {
+		path:          backing.clone(),
 		plan_writable: true,
 	});
 	session
@@ -714,11 +702,8 @@ async fn apply_never_reuses_url_answers_given_to_previews() {
 	let fresh = sandbox.path().join("fresh.md");
 	std::fs::write(&stale, "one\n").unwrap();
 	std::fs::write(&fresh, "one\n").unwrap();
-	let answer = |absolute: &std::path::Path| UrlResolution {
-		absolute:      Some(absolute.to_owned()),
-		content:       None,
-		deferred:      false,
-		error:         None,
+	let answer = |absolute: &std::path::Path| UrlAnswer::Backed {
+		path:          absolute.to_owned(),
 		plan_writable: false,
 	};
 	let writer = DiskWriter::default();
@@ -804,11 +789,8 @@ async fn begin_apply_url_targets_cover_every_url_before_the_first_stage() {
 		assert_eq!(targets, expected, "{mode:?}");
 		for url in targets {
 			let name = url.trim_start_matches("local://");
-			session.provide(url.clone(), UrlResolution {
-				absolute:      Some(sandbox.path().join(name)),
-				content:       None,
-				deferred:      false,
-				error:         None,
+			session.provide(url.clone(), UrlAnswer::Backed {
+				path:          sandbox.path().join(name),
 				plan_writable: false,
 			});
 		}

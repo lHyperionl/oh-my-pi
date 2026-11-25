@@ -68,11 +68,71 @@ impl FileOp {
 	}
 }
 
-/// A resolved edit target: the absolute filesystem path plus the display
-/// path the model authored (after unique-suffix recovery, if any).
+/// A resolved disk path or an opaque host resource key.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Location {
+	/// A filesystem path.
+	Disk(PathBuf),
+	/// A host resource whose identity is independent of the filesystem.
+	Hosted(String),
+}
+
+impl Location {
+	/// The location as UTF-8, if it can be represented without loss.
+	pub fn as_text(&self) -> Option<&str> {
+		match self {
+			Self::Disk(path) => path.to_str(),
+			Self::Hosted(key) => Some(key),
+		}
+	}
+
+	/// The location text for diagnostics.
+	pub fn display(&self) -> std::borrow::Cow<'_, str> {
+		match self {
+			Self::Disk(path) => path.to_string_lossy(),
+			Self::Hosted(key) => std::borrow::Cow::Borrowed(key),
+		}
+	}
+
+	/// The location at the host writer boundary.
+	pub(crate) fn writer_path(&self) -> PathBuf {
+		match self {
+			Self::Disk(path) => path.clone(),
+			Self::Hosted(key) => PathBuf::from(key),
+		}
+	}
+
+	/// Canonicalize the underlying filesystem path.
+	pub fn canonical_key(&self) -> Self {
+		match self {
+			Self::Disk(path) => Self::Disk(crate::path_policy::canonical_key(path)),
+			Self::Hosted(_) => self.clone(),
+		}
+	}
+
+	pub(crate) fn capacity(&self) -> usize {
+		match self {
+			Self::Disk(path) => path.capacity(),
+			Self::Hosted(key) => key.capacity(),
+		}
+	}
+
+	/// Whether this is a disk notebook.
+	pub fn is_notebook(&self) -> bool {
+		matches!(self, Self::Disk(path) if crate::notebook::is_notebook_path(path))
+	}
+}
+
+impl From<PathBuf> for Location {
+	fn from(path: PathBuf) -> Self {
+		Self::Disk(path)
+	}
+}
+
+/// A resolved location plus the model-authored display path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Resolved {
-	pub absolute: PathBuf,
+	pub location: Location,
 	pub display:  String,
 }
 
@@ -92,8 +152,8 @@ pub enum HeaderKind {
 pub struct StagedFile {
 	/// Display path as authored (after suffix / tag recovery).
 	pub display:            String,
-	/// Absolute target path.
-	pub absolute:           PathBuf,
+	/// Resolved target location.
+	pub location:           Location,
 	pub op:                 FileOp,
 	/// Destination for a rename (`*** Move to:` / hashline `MV`). The write
 	/// request becomes a `move`; the result reports `Moved to <display>`.
@@ -137,10 +197,10 @@ pub struct StagedFile {
 
 impl StagedFile {
 	/// Minimal staged update; callers fill in the optional fields.
-	pub fn new(display: impl Into<String>, absolute: PathBuf, op: FileOp) -> Self {
+	pub fn new(display: impl Into<String>, location: impl Into<Location>, op: FileOp) -> Self {
 		Self {
 			display: display.into(),
-			absolute,
+			location: location.into(),
 			op,
 			move_to: None,
 			existed: true,
