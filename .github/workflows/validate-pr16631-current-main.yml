@@ -2,8 +2,7 @@
 name: PR 16631 hosted CI (b44dc8d397)
 
 on:
-   push:
-      branches: ["validate/pr16631-current-main"]
+   workflow_dispatch:
 
 env:
    FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
